@@ -1,9 +1,8 @@
 pub mod protocol;
-pub mod session;
 
 use std::collections::HashSet;
 
-pub use protocol::{ClientMessage, ServerMessage, Status};
+pub use protocol::{Replica, ServerMessage, StateSync, Status};
 use rand::{Rng, RngExt};
 
 /// Default playable board size shared by client and server.
@@ -626,6 +625,22 @@ impl Game {
         }
 
         true
+    }
+
+    /// Jumps the current token to `landing` if that cell is a legal
+    /// landing for it. This is the click-level operation shared by local
+    /// play and the session: a click names the cell that was clicked and
+    /// is resolved against the live board, never re-interpreted from a
+    /// possibly stale view.
+    pub fn try_jump_to(&mut self, landing: Coord) -> bool {
+        let Some(jump) = self
+            .legal_current_jumps()
+            .into_iter()
+            .find(|jump| jump.landing == landing)
+        else {
+            return false;
+        };
+        self.try_jump(jump.direction)
     }
 
     pub fn try_select_activated_token(&mut self, token: TokenId) -> bool {

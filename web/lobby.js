@@ -119,13 +119,23 @@ export function createLobby({ root, title, tagline, connector, onStart, onLeave,
 
   // The game's handlers are registered first (in onStart), so it sees
   // every event before the lobby's teardown policy acts on it.
+  let peerCount = 0
   function watch() {
     connection.onPeerJoin(() => {
+      peerCount++
+      // Rooms seat two players: a guest seeing a third peer has lost the
+      // race for the seat. The host keeps the room (its game continues
+      // with the seated peer).
+      if (peerCount > 1 && role === 'guest') {
+        back('the room is full')
+        return
+      }
       if (role === 'guest') {
         refs.joiningStatus.textContent = 'connected — waiting for the host to start…'
       }
     })
     connection.onPeerLeave(() => {
+      peerCount = Math.max(0, peerCount - 1)
       if (role === 'guest') {
         back('the host left the room')
       }
@@ -186,13 +196,19 @@ export function createLobby({ root, title, tagline, connector, onStart, onLeave,
     if (event.key === 'Enter') join(refs.codeInput.value)
   })
 
+  // Called from the game (via the bridge): abandon the room and return
+  // to the menu.
+  function leaveFromGame(notice) {
+    back(notice)
+  }
+
   window.addEventListener('beforeunload', () => connection?.leave())
 
   // Deep link: ?room=CODE joins right away.
   const fromUrl = sanitize(new URLSearchParams(window.location.search).get('room'))
   if (fromUrl) join(fromUrl)
 
-  return { hide }
+  return { hide, leave: leaveFromGame }
 }
 
 function generateCode() {

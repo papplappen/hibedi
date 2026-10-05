@@ -1,8 +1,8 @@
 mod net;
 
 use hibedi_core::{
-    BOARD_HEIGHT, BOARD_WIDTH, Cell, ClientMessage, Coord, Game, GameResult, Phase, ServerMessage,
-    Side, Status, WinReason,
+    BOARD_HEIGHT, BOARD_WIDTH, Cell, Coord, Game, GameResult, Phase, Replica, Side, StateSync,
+    WinReason,
 };
 use macroquad::prelude::*;
 use net::{NetEvent, NetHandle};
@@ -68,74 +68,149 @@ struct Buttons {
     leave: Option<Rect>,
 }
 
+/// One seat of a game: our local game plus, online, the sync layer that
+/// mirrors it to the other seat. Clicks apply to `game` exactly like
+/// local hotseat play; applied actions are announced and incoming
+/// announcements are adopted (see `Replica`).
+struct GameView {
+    game: Option<Game>,
+    /// Our seat online; `None` in local hotseat (anyone may click).
+    side: Option<Side>,
+    /// Online sync state; `None` in local play.
+    net: Option<Online>,
+}
+
 struct Online {
     net: NetHandle,
+    replica: Replica,
+    /// The red seat generates the first game when the other seat fills;
+    /// every seat generates its own game on a reset.
+    creator: bool,
     /// Native only: the WebSocket URL, shown on the waiting screen.
     #[cfg(not(target_arch = "wasm32"))]
     url: Option<String>,
+    /// Whether the room link is up (native reconnects; wasm rooms are
+    /// terminal).
+    connected: bool,
+    opponent_present: bool,
+    /// Why the room ended for good, if it did.
+    closed: Option<String>,
     /// Wasm only: whether the lobby overlay has been told to hide itself.
     #[cfg(target_arch = "wasm32")]
     view_started: bool,
-    /// Wasm only: the room ended (host left, or the lobby took over);
-    /// return to the lobby.
+    /// Wasm only: the peer holding the other seat (directed sends).
     #[cfg(target_arch = "wasm32")]
-    closed: bool,
-    side: Option<Side>,
-    game: Option<Game>,
-    opponent_present: bool,
-    status: Status,
-    connected: bool,
-    toast: Option<(String, f64)>,
+    peer: Option<String>,
 }
 
-impl Online {
-    #[cfg(not(target_arch = "wasm32"))]
-    fn connect(url: String) -> Self {
-        let net = net::spawn(url.clone());
-
+impl GameView {
+    fn local() -> Self {
         Self {
-            net,
-            url: Some(url),
+            game: Some(new_local_game()),
             side: None,
-            game: None,
-            opponent_present: false,
-            status: Status::Waiting,
-            connected: false,
-            toast: None,
+            net: None,
         }
     }
 
-    /// Wasm P2P: the bridge already put us in a room (hosting or joined);
-    /// the lobby overlay is still up until the first game state arrives.
-    #[cfg(target_arch = "wasm32")]
-    fn p2p() -> Self {
+    /// Native online: connect to the relay; our seat arrives with the
+    /// hello.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn relay(url: String) -> Self {
         Self {
-            net: NetHandle,
-            view_started: false,
-            closed: false,
-            side: None,
             game: None,
-            opponent_present: false,
-            status: Status::Waiting,
-            connected: true,
-            toast: None,
+            side: None,
+            net: Some(Online::relay(url)),
+        }
+    }
+
+    /// Wasm online: the bridge already put us in a room; the lobby
+    /// overlay is still up until the first game state is adopted. The
+    /// side comes from the bridge's start event (which the lobby phase
+    /// consumes, so it must be handed over here, not re-read later).
+    #[cfg(target_arch = "wasm32")]
+    fn p2p(side: Side) -> Self {
+        Self {
+            game: None,
+            side: Some(side),
+            net: Some(Online::p2p(side)),
         }
     }
 
     fn pump(&mut self) {
-        while let Some(event) = self.net.poll() {
+        let Some(online) = &mut self.net else {
+            return;
+        };
+        while let Some(event) = online.net.poll() {
             match event {
-                NetEvent::Connected => self.connected = true,
+                NetEvent::Connected { side } => {
+                    self.side = Some(side);
+                    online.connected = true;
+                    // The room creator takes red — matching the relay
+                    // server, which seats the first connection red.
+                    online.creator = side == Side::Red;
+                }
                 #[cfg(not(target_arch = "wasm32"))]
-                NetEvent::Disconnected => self.connected = false,
-                // Both end the P2P view: the host left, or the lobby took
-                // over. The lobby overlay shows the reason either way.
+                NetEvent::Disconnected => online.connected = false,
+                NetEvent::Closed { reason } => {
+                    online.connected = false;
+                    if online.closed.is_none() {
+                        online.closed = Some(reason);
+                    }
+                }
                 #[cfg(target_arch = "wasm32")]
-                NetEvent::Closed { .. } | NetEvent::Lobby => self.closed = true,
-                // Native never emits Closed.
+                NetEvent::Lobby => {
+                    // The lobby took over (its overlay shows the reason);
+                    // end the game view.
+                    online.connected = false;
+                    if online.closed.is_none() {
+                        online.closed = Some(String::new());
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                NetEvent::PeerJoined { peer } => {
+                    online.opponent_present = true;
+                    if online.peer.is_none() {
+                        online.peer = peer;
+                    }
+                    // Re-seat whoever joined with our current state; the
+                    // red seat generates the first game if there is none.
+                    if self.game.is_none() && online.creator {
+                        self.game = Some(new_local_game());
+                    }
+                    online.announce(self.game.as_ref());
+                }
                 #[cfg(not(target_arch = "wasm32"))]
-                NetEvent::Closed { .. } => {}
-                NetEvent::Message(message) => self.apply(message),
+                NetEvent::PeerJoined { .. } => {
+                    online.opponent_present = true;
+                    if self.game.is_none() && online.creator {
+                        self.game = Some(new_local_game());
+                    }
+                    online.announce(self.game.as_ref());
+                }
+                #[cfg(target_arch = "wasm32")]
+                NetEvent::PeerLeft { peer } => {
+                    if online.peer.as_deref() == peer.as_deref() {
+                        // The other seat emptied; a later joiner can
+                        // reclaim it.
+                        online.peer = None;
+                        online.opponent_present = false;
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                NetEvent::PeerLeft { .. } => {
+                    online.opponent_present = false;
+                }
+                NetEvent::Sync(sync) => {
+                    let current =
+                        serde_json::to_value(&self.game).expect("games always serialize");
+                    if online.replica.should_adopt(&sync, &current)
+                        && let Ok(state) =
+                            serde_json::from_value::<Option<Game>>(sync.state.clone())
+                    {
+                        self.game = state;
+                        online.replica.adopt(&sync);
+                    }
+                }
                 // Lobby-scoped events; only the lobby consumes those.
                 #[cfg(target_arch = "wasm32")]
                 NetEvent::LocalGame => {}
@@ -145,110 +220,141 @@ impl Online {
         // The first game state means the game view is live: hand the
         // screen over from the lobby overlay to the canvas.
         #[cfg(target_arch = "wasm32")]
-        if !self.view_started && self.game.is_some() {
-            self.view_started = true;
-            self.net.notify_ready();
-        }
-
-        expire_toast(&mut self.toast);
-    }
-
-    fn apply(&mut self, message: ServerMessage) {
-        match message {
-            ServerMessage::Welcome { side } => {
-                self.side = Some(side);
-            }
-            ServerMessage::State {
-                game,
-                side,
-                opponent_present,
-                status,
-            } => {
-                self.side = Some(side);
-                self.game = game;
-                self.opponent_present = opponent_present;
-                self.status = status;
-            }
-            ServerMessage::Error { reason } => {
-                self.toast = Some((reason, get_time() + 4.0));
-            }
+        if !online.view_started && self.game.is_some() {
+            online.view_started = true;
+            online.net.notify_ready();
         }
     }
 
     fn can_play(&self) -> bool {
-        self.connected
-            && self.status == Status::Playing
-            && self.opponent_present
-            && self
-                .game
-                .as_ref()
-                .is_some_and(|game| self.side == Some(game.current_player()))
+        let Some(game) = &self.game else {
+            return false;
+        };
+        if game.result().is_some() {
+            return false;
+        }
+        match &self.net {
+            // Hotseat: whoever's turn it is clicks.
+            None => true,
+            Some(online) => {
+                online.connected
+                    && online.opponent_present
+                    && self.side == Some(game.current_player())
+            }
+        }
     }
 
-    fn wants_new_game(&self) -> bool {
-        self.connected
-            && self.status == Status::Finished
-            && self.opponent_present
-            && self.game.is_some()
+    fn wants_reset(&self) -> bool {
+        match &self.net {
+            // Hotseat: the button resets any time.
+            None => self.game.is_some(),
+            Some(online) => {
+                online.connected
+                    && online.opponent_present
+                    && self.game.as_ref().is_some_and(|game| game.result().is_some())
+            }
+        }
     }
 
+    /// Leaving only makes sense while the opponent is gone: the game is
+    /// paused and abandoned.
     fn wants_leave(&self) -> bool {
-        self.connected && self.status == Status::Paused
+        let Some(online) = &self.net else {
+            return false;
+        };
+        online.connected && self.game.is_some() && !online.opponent_present
     }
 
-    fn handle_click(&mut self, layout: &BoardLayout, buttons: &Buttons, mouse: Vec2) {
-        if let Some(rect) = buttons.primary
-            && point_in_rect(mouse, rect)
-            && self.wants_new_game()
-        {
-            self.net.send(ClientMessage::NewGame);
-            return;
-        }
-        if let Some(rect) = buttons.leave
-            && point_in_rect(mouse, rect)
-            && self.wants_leave()
-        {
-            self.net.send(ClientMessage::Leave);
-            return;
-        }
-
-        if !self.can_play() {
-            return;
-        }
-        let (Some(game), Some(coord)) = (&self.game, layout.coord_at(mouse)) else {
+    /// Applies a board click exactly like hotseat play and announces it
+    /// if it changed anything.
+    fn click(&mut self, coord: Coord) {
+        let Some(game) = &mut self.game else {
             return;
         };
-        if let Some(action) = client_action(game, coord) {
-            self.net.send(action);
+        if handle_local_click(game, coord)
+            && let Some(online) = &mut self.net
+        {
+            online.announce(Some(game));
+        }
+    }
+
+    /// Starts a fresh game and announces it; simultaneous resets
+    /// converge deterministically (see `Replica`).
+    fn reset(&mut self) {
+        self.game = Some(new_local_game());
+        if let Some(online) = &mut self.net {
+            online.announce(self.game.as_ref());
+        }
+    }
+
+    /// Abandons the game: wasm returns to the lobby menu (ending the
+    /// room); native clears the seat so a later pairing starts fresh.
+    fn leave(&mut self) {
+        match &mut self.net {
+            #[cfg(target_arch = "wasm32")]
+            Some(online) => online.net.leave_to_menu(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(online) => {
+                self.game = None;
+                online.announce(None);
+            }
+            None => {}
         }
     }
 }
 
-/// Draws a timed toast at the bottom of the screen; silently expires.
-fn draw_toast(text: &str, expires: f64) {
-    if get_time() > expires {
-        return;
+impl Online {
+    /// Publishes our current state so the other seat can adopt it.
+    fn announce(&mut self, game: Option<&Game>) {
+        self.replica.version += 1;
+        let sync = StateSync {
+            version: self.replica.version,
+            state: serde_json::to_value(game).expect("games always serialize"),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let peer = self.peer.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        let peer: Option<String> = None;
+        self.net.announce(&sync, peer.as_deref());
     }
 
-    let width = (screen_width() - 60.0).min(520.0);
-    let x = (screen_width() - width) / 2.0;
-    let y = screen_height() - 104.0;
-    draw_round_rect(x, y, width, 66.0, 12.0, PANEL);
-    draw_rectangle_lines(x, y, width, 66.0, 12.0, GOLD);
-    draw_wrapped_text(text, x + 18.0, y + 28.0, width - 36.0, 19.0, 15.0, WHITE);
-}
+    #[cfg(not(target_arch = "wasm32"))]
+    fn relay(url: String) -> Self {
+        Self {
+            net: net::spawn(url.clone()),
+            replica: Replica::default(),
+            creator: false,
+            url: Some(url),
+            connected: false,
+            opponent_present: false,
+            closed: None,
+        }
+    }
 
-fn expire_toast(toast: &mut Option<(String, f64)>) {
-    if let Some((_, expires)) = toast
-        && get_time() > *expires
-    {
-        *toast = None;
+    /// Wasm P2P: the bridge already put us in a room. The room creator
+    /// takes red — matching the relay server, which seats the first
+    /// connection red.
+    #[cfg(target_arch = "wasm32")]
+    fn p2p(side: Side) -> Self {
+        Self {
+            net: NetHandle,
+            replica: Replica::default(),
+            creator: side == Side::Red,
+            connected: true,
+            opponent_present: false,
+            closed: None,
+            view_started: false,
+            peer: None,
+        }
     }
 }
 
+/// The lobby variant exists only on wasm and the mode lives briefly on
+/// the stack; the size difference is irrelevant.
+#[allow(clippy::large_enum_variant)]
 enum Mode {
-    Local { game: Game },
-    Online(Online),
+    /// The game itself: a local hotseat, or one seat of a networked room.
+    Game(GameView),
     /// Wasm only: the lobby overlay (HTML) owns the screen; the canvas
     /// idles until the bridge reports the player's choice.
     #[cfg(target_arch = "wasm32")]
@@ -258,13 +364,10 @@ enum Mode {
 impl Mode {
     fn storage_dims(&self) -> (usize, usize) {
         match self {
-            Self::Local { game } => (game.board().storage_width(), game.board().storage_height()),
-            Self::Online(online) => online
-                .game
-                .as_ref()
-                .map_or((BOARD_WIDTH + 2, BOARD_HEIGHT + 2), |game| {
-                    (game.board().storage_width(), game.board().storage_height())
-                }),
+            Self::Game(view) => view.game.as_ref().map_or(
+                (BOARD_WIDTH + 2, BOARD_HEIGHT + 2),
+                |game| (game.board().storage_width(), game.board().storage_height()),
+            ),
             #[cfg(target_arch = "wasm32")]
             Self::Lobby => (BOARD_WIDTH + 2, BOARD_HEIGHT + 2),
         }
@@ -341,11 +444,9 @@ async fn main() {
             Some(raw) => {
                 let url = normalize_url(&raw);
                 println!("connecting to {url}");
-                Mode::Online(Online::connect(url))
+                Mode::Game(GameView::relay(url))
             }
-            None => Mode::Local {
-                game: new_local_game(),
-            },
+            None => Mode::Game(GameView::local()),
         }
     };
     #[cfg(target_arch = "wasm32")]
@@ -360,8 +461,16 @@ async fn main() {
         #[cfg_attr(not(target_arch = "wasm32"), expect(unused_mut))]
         let mut transition: Option<Mode> = None;
         match &mut mode {
-            Mode::Local { .. } => {}
-            Mode::Online(online) => online.pump(),
+            Mode::Game(view) => {
+                view.pump();
+                // The room ended (wasm: the host left, or the lobby took
+                // over — its overlay shows the reason). Native keeps the
+                // view; its waiting panel shows the reason.
+                #[cfg(target_arch = "wasm32")]
+                if view.net.as_ref().is_some_and(|online| online.closed.is_some()) {
+                    transition = Some(Mode::Lobby);
+                }
+            }
             #[cfg(target_arch = "wasm32")]
             Mode::Lobby => {
                 if let Some(next_mode) = lobby_update() {
@@ -377,17 +486,7 @@ async fn main() {
         // Input, possibly switching modes.
         if transition.is_none() {
             match &mut mode {
-                Mode::Local { game } => handle_local_input(game, &layout, &buttons),
-                Mode::Online(online) => {
-                    handle_online_input(online, &layout, &buttons);
-                    // The room ended (host left, or the lobby took over):
-                    // back to the lobby, which shows the reason.
-                    #[cfg(target_arch = "wasm32")]
-                    if online.closed {
-                        online.closed = false;
-                        transition = Some(Mode::Lobby);
-                    }
-                }
+                Mode::Game(view) => handle_input(view, &layout, &buttons),
                 #[cfg(target_arch = "wasm32")]
                 Mode::Lobby => {}
             }
@@ -409,12 +508,8 @@ async fn main() {
 fn lobby_update() -> Option<Mode> {
     while let Some(event) = NetHandle.poll() {
         match event {
-            NetEvent::Connected => return Some(Mode::Online(Online::p2p())),
-            NetEvent::LocalGame => {
-                return Some(Mode::Local {
-                    game: new_local_game(),
-                })
-            }
+            NetEvent::Connected { side } => return Some(Mode::Game(GameView::p2p(side))),
+            NetEvent::LocalGame => return Some(Mode::Game(GameView::local())),
             NetEvent::Lobby => {}
             _ => {}
         }
@@ -422,71 +517,45 @@ fn lobby_update() -> Option<Mode> {
     None
 }
 
-fn handle_local_input(game: &mut Game, layout: &BoardLayout, buttons: &Buttons) {
+/// Hotseat input, identical for local and online play: online play only
+/// adds the announcement of applied actions (see [`GameView::click`]).
+fn handle_input(view: &mut GameView, layout: &BoardLayout, buttons: &Buttons) {
     let clicked = is_mouse_button_pressed(MouseButton::Left);
     let mouse: Vec2 = mouse_position().into();
 
-    if is_key_pressed(KeyCode::R)
-        || (clicked && buttons.primary.is_some_and(|rect| point_in_rect(mouse, rect)))
-    {
-        *game = new_local_game();
-    } else if clicked && let Some(coord) = layout.coord_at(mouse) {
-        handle_local_click(game, coord);
-    }
-}
-
-fn handle_online_input(online: &mut Online, layout: &BoardLayout, buttons: &Buttons) {
-    let clicked = is_mouse_button_pressed(MouseButton::Left);
-    let mouse: Vec2 = mouse_position().into();
-
-    if is_key_pressed(KeyCode::R) && online.wants_new_game() {
-        online.net.send(ClientMessage::NewGame);
+    // Hotseat resets any time; online only once the game is over.
+    if is_key_pressed(KeyCode::R) && (view.net.is_none() || view.wants_reset()) {
+        view.reset();
     } else if clicked {
-        online.handle_click(layout, buttons, mouse);
+        if let Some(rect) = buttons.primary
+            && point_in_rect(mouse, rect)
+            && view.wants_reset()
+        {
+            view.reset();
+        } else if let Some(rect) = buttons.leave
+            && point_in_rect(mouse, rect)
+            && view.wants_leave()
+        {
+            view.leave();
+        } else if view.can_play()
+            && let Some(coord) = layout.coord_at(mouse)
+        {
+            view.click(coord);
+        }
     }
 }
 
-fn handle_local_click(game: &mut Game, coord: Coord) {
+/// Applies a board click the way a hotseat click works; returns whether
+/// anything changed.
+fn handle_local_click(game: &mut Game, coord: Coord) -> bool {
     match game.phase() {
-        Phase::PlaceInitialToken => {
-            game.try_place_initial_token(coord);
-        }
-        Phase::ChooseJump => {
-            if let Some(jump) = game
-                .legal_current_jumps()
-                .into_iter()
-                .find(|jump| jump.landing == coord)
-            {
-                game.try_jump(jump.direction);
-            }
-        }
+        Phase::PlaceInitialToken => game.try_place_initial_token(coord),
+        Phase::ChooseJump => game.try_jump_to(coord),
         Phase::ChooseActivatedToken => {
-            if let Some(token) = game.board().token_at(coord) {
-                game.try_select_activated_token(token);
-            }
+            let token = game.board().token_at(coord);
+            token.is_some_and(|token| game.try_select_activated_token(token))
         }
-        Phase::GameOver => {}
-    }
-}
-
-fn client_action(game: &Game, coord: Coord) -> Option<ClientMessage> {
-    match game.phase() {
-        Phase::PlaceInitialToken => Some(ClientMessage::Place {
-            x: coord.x,
-            y: coord.y,
-        }),
-        Phase::ChooseJump => game
-            .legal_current_jumps()
-            .into_iter()
-            .find(|jump| jump.landing == coord)
-            .map(|jump| ClientMessage::Jump {
-                direction: jump.direction,
-            }),
-        Phase::ChooseActivatedToken => game
-            .board()
-            .token_at(coord)
-            .map(|id| ClientMessage::SelectToken { id }),
-        Phase::GameOver => None,
+        Phase::GameOver => false,
     }
 }
 
@@ -519,24 +588,24 @@ fn board_layout(storage_width: usize, storage_height: usize) -> BoardLayout {
 
 fn buttons_for(mode: &Mode, layout: &BoardLayout) -> Buttons {
     match mode {
-        Mode::Local { .. } => Buttons {
-            primary: Some(desktop_or_compact_rect(layout, 438.0)),
-            leave: None,
-        },
-        Mode::Online(online) => {
-            Buttons {
-                primary: online.wants_new_game().then(|| {
+        Mode::Game(view) => match &view.net {
+            None => Buttons {
+                primary: Some(desktop_or_compact_rect(layout, 438.0)),
+                leave: None,
+            },
+            Some(_) => Buttons {
+                primary: view.wants_reset().then(|| {
                     if layout.compact {
                         compact_button_rect(layout, 0.0)
                     } else {
                         desktop_or_compact_rect(layout, 420.0)
                     }
                 }),
-                leave: online
+                leave: view
                     .wants_leave()
-                    .then(|| leave_rect(layout, online.wants_new_game())),
-            }
-        }
+                    .then(|| leave_rect(layout, view.wants_reset())),
+            },
+        },
         #[cfg(target_arch = "wasm32")]
         Mode::Lobby => Buttons {
             primary: None,
@@ -591,24 +660,17 @@ fn waiting_panel_rect(layout: &BoardLayout) -> Rect {
 
 fn draw_scene(mode: &Mode, layout: &BoardLayout, buttons: &Buttons) {
     match mode {
-        Mode::Local { game } => {
-            draw_header(Some(game), None, true, layout);
-            draw_board(game, layout);
-            draw_panel(game, layout, buttons, None);
-        }
-        Mode::Online(online) => {
-            draw_header(online.game.as_ref(), online.side, online.connected, layout);
-            if let Some(game) = &online.game {
+        Mode::Game(view) => {
+            let connected = view.net.as_ref().is_none_or(|online| online.connected);
+            draw_header(view.game.as_ref(), view.side, connected, layout);
+            if let Some(game) = &view.game {
                 draw_board(game, layout);
-                draw_panel(game, layout, buttons, Some(online));
+                draw_panel(game, layout, buttons, view);
             } else {
                 // Wasm: the lobby overlay covers the screen until the
                 // first game state arrives; native draws a waiting panel.
                 #[cfg(not(target_arch = "wasm32"))]
-                draw_waiting(online, layout);
-            }
-            if let Some((text, expires)) = &online.toast {
-                draw_toast(text, *expires);
+                draw_waiting(view, layout);
             }
         }
         // Wasm: the lobby overlay owns the screen; draw nothing.
@@ -764,7 +826,7 @@ fn draw_board(game: &Game, layout: &BoardLayout) {
     }
 }
 
-fn draw_panel(game: &Game, layout: &BoardLayout, buttons: &Buttons, online: Option<&Online>) {
+fn draw_panel(game: &Game, layout: &BoardLayout, buttons: &Buttons, view: &GameView) {
     let (x, y, width) = if layout.compact {
         (
             22.0,
@@ -780,7 +842,7 @@ fn draw_panel(game: &Game, layout: &BoardLayout, buttons: &Buttons, online: Opti
     };
     let height = if layout.compact {
         146.0
-    } else if online.is_some() {
+    } else if view.net.is_some() {
         448.0
     } else {
         396.0
@@ -794,10 +856,10 @@ fn draw_panel(game: &Game, layout: &BoardLayout, buttons: &Buttons, online: Opti
     draw_count_row(x + 18.0, y + 58.0, "RED", red, RED_CELL);
     draw_count_row(x + 18.0, y + 84.0, "GREEN", green, GREEN_CELL);
 
-    let status = online.map_or_else(
-        || status_text(game),
-        |online| online_status_text(online, game),
-    );
+    let status = match &view.net {
+        None => status_text(game),
+        Some(online) => online_status_text(online, game),
+    };
 
     if !layout.compact {
         draw_line(
@@ -840,8 +902,8 @@ fn draw_panel(game: &Game, layout: &BoardLayout, buttons: &Buttons, online: Opti
             MUTED,
         );
 
-        if let Some(online) = online {
-            draw_online_lines(online, x + 18.0, y + 344.0);
+        if !view.net.is_none() {
+            draw_online_lines(view, x + 18.0, y + 344.0);
         }
     } else {
         draw_wrapped_text(
@@ -856,15 +918,15 @@ fn draw_panel(game: &Game, layout: &BoardLayout, buttons: &Buttons, online: Opti
     }
 
     if let Some(rect) = buttons.primary {
-        let finished = online.is_none() && game.phase() == Phase::GameOver;
+        let finished = view.net.is_none() && game.phase() == Phase::GameOver;
         draw_button(
             rect,
-            if layout.compact || online.is_some() {
+            if layout.compact || view.net.is_some() {
                 "NEW GAME"
             } else {
                 "NEW GAME  R"
             },
-            if finished || online.is_some() {
+            if finished || view.net.is_some() {
                 GOLD
             } else {
                 PANEL_EDGE
@@ -877,12 +939,16 @@ fn draw_panel(game: &Game, layout: &BoardLayout, buttons: &Buttons, online: Opti
     }
 }
 
-fn draw_online_lines(online: &Online, x: f32, y: f32) {
-    let you = match online.side {
+fn draw_online_lines(view: &GameView, x: f32, y: f32) {
+    let online = match &view.net {
+        Some(online) => online,
+        None => return,
+    };
+    let you = match view.side {
         Some(side) => format!("You are {}", side.label()),
         None => "Not seated yet".to_owned(),
     };
-    draw_circle(x + 6.0, y - 5.0, 6.0, online.side.map_or(MUTED, side_color));
+    draw_circle(x + 6.0, y - 5.0, 6.0, view.side.map_or(MUTED, side_color));
     draw_text(&you, x + 20.0, y, 15.0, WHITE);
 
     let connection = if !online.connected {
@@ -909,25 +975,35 @@ fn draw_button(rect: Rect, label: &str, fill: Color) {
 
 /// The native waiting screen (the wasm lobby overlay covers this case).
 #[cfg(not(target_arch = "wasm32"))]
-fn draw_waiting(online: &Online, layout: &BoardLayout) {
+fn draw_waiting(view: &GameView, layout: &BoardLayout) {
     let panel = waiting_panel_rect(layout);
     draw_round_rect(panel.x, panel.y, panel.w, panel.h, 18.0, PANEL);
     draw_rectangle_lines(panel.x, panel.y, panel.w, panel.h, 18.0, PANEL_EDGE);
 
-    let (title, body) = match (&online.connected, &online.url) {
-        (false, Some(url)) => ("Connection lost", format!("Reconnecting to {url}…")),
-        _ => (
-            "Waiting for a second player",
+    let online = view.net.as_ref().expect("the waiting screen is online-only");
+    let (title, body) = if let Some(reason) = &online.closed {
+        ("Connection ended".to_owned(), reason.clone())
+    } else if !online.connected {
+        (
+            "Connection lost".to_owned(),
+            format!(
+                "Reconnecting to {}…",
+                online.url.as_deref().unwrap_or("the server")
+            ),
+        )
+    } else {
+        (
+            "Waiting for a second player".to_owned(),
             format!(
                 "Both clients must connect to {}",
                 online.url.as_deref().unwrap_or("the server")
             ),
-        ),
+        )
     };
 
-    let title_width = measure_text(title, None, 24, 1.0).width;
+    let title_width = measure_text(&title, None, 24, 1.0).width;
     draw_text(
-        title,
+        &title,
         panel.x + (panel.w - title_width) / 2.0,
         panel.y + 74.0,
         24.0,
@@ -949,7 +1025,7 @@ fn online_status_text(online: &Online, game: &Game) -> String {
     if !online.connected {
         return "Connection lost. Trying to reconnect…".to_owned();
     }
-    if online.status == Status::Paused {
+    if game.result().is_none() && !online.opponent_present {
         return "Waiting for your opponent to reconnect. You can leave the game.".to_owned();
     }
     status_text(game)

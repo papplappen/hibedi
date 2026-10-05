@@ -1,16 +1,16 @@
 //! Trystero/WebRTC transport for wasm: a single-threaded bridge to the
-//! JS side (web/net.js). The hosting client runs the authoritative
-//! [`Session`] locally (see `net::host`); the guest talks to it over the
-//! WebRTC data channel. All state lives in one global because the JS
-//! entry points have no access to client instances.
+//! JS side (web/game.js). Both seats are symmetric: each side plays its
+//! local game and exchanges [`StateSync`] announcements through the
+//! bridge. The lobby's role only decides who holds the red seat (and so
+//! who generates the first game). All state lives in one global because
+//! the JS entry points have no access to client instances.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use hibedi_core::{ClientMessage, ServerMessage};
+use hibedi_core::{Side, StateSync};
 
-use super::host::{Directed, HostGame};
 use super::{BridgeCommand, BridgeEvent, NetEvent, StartRole};
 
 unsafe extern "C" {
@@ -49,22 +49,15 @@ impl NetHandle {
         event
     }
 
-    pub fn send(&self, message: ClientMessage) {
+    /// Publishes a state announcement to `peer` (the other seat; `None`
+    /// broadcasts).
+    pub fn announce(&self, sync: &StateSync, peer: Option<&str>) {
         {
             let mut net = state();
-            match &mut net.role {
-                Role::Host(host) => {
-                    let mut out = Vec::new();
-                    let events = host.local_message(message, &mut out);
-                    net.events.extend(events);
-                    queue_directed(&mut net.outbound, out);
-                }
-                Role::Guest => net.outbound.push_back(BridgeCommand::Send {
-                    data: serde_json::to_value(&message).expect("client messages always serialize"),
-                    peer: None,
-                }),
-                Role::Idle => {}
-            }
+            net.outbound.push_back(BridgeCommand::Send {
+                data: serde_json::to_value(sync).expect("sync messages always serialize"),
+                peer: peer.map(str::to_owned),
+            });
         }
         flush();
     }
@@ -77,27 +70,22 @@ impl NetHandle {
         }
         flush();
     }
-}
 
-/// Queues directed session messages as generic `send` commands.
-fn queue_directed(outbound: &mut VecDeque<BridgeCommand>, messages: Vec<Directed>) {
-    outbound.extend(messages.into_iter().map(|(peer, message)| BridgeCommand::Send {
-        data: serde_json::to_value(&message).expect("server messages always serialize"),
-        peer,
-    }));
-}
-
-enum Role {
-    /// In the lobby: the HTML overlay decides what to do next.
-    Idle,
-    /// Joined an existing room as the guest; the host runs the session.
-    Guest,
-    /// Owns the room and runs the authoritative session locally.
-    Host(Box<HostGame>),
+    /// Asks the lobby to return to its menu; the room ends.
+    pub fn leave_to_menu(&self) {
+        {
+            state().outbound.push_back(BridgeCommand::Leave);
+        }
+        flush();
+    }
 }
 
 struct WasmNet {
-    role: Role,
+    /// In a room (between the lobby's start and its leave).
+    seated: bool,
+    /// The peer holding the other seat: the first joiner. Later joiners
+    /// are strangers; the lobby shows them the door.
+    peer: Option<String>,
     events: VecDeque<NetEvent>,
     outbound: VecDeque<BridgeCommand>,
 }
@@ -105,7 +93,8 @@ struct WasmNet {
 impl WasmNet {
     const fn new() -> Self {
         Self {
-            role: Role::Idle,
+            seated: false,
+            peer: None,
             events: VecDeque::new(),
             outbound: VecDeque::new(),
         }
@@ -156,73 +145,45 @@ pub extern "C" fn hibedi_on_event(ptr: *const u8, len: u32) {
         return;
     };
 
-    let mut outbound = Vec::new();
-    {
-        let mut net = state();
-        match event {
-            BridgeEvent::Start { role } => match role {
-                StartRole::Local => net.events.push_back(NetEvent::LocalGame),
-                StartRole::Host if matches!(net.role, Role::Idle) => {
-                    // The lobby opened a room: run the authoritative session.
-                    // Connected goes first so the lobby hands over before
-                    // the initial state events arrive.
-                    let (host, events) = HostGame::new(&mut outbound);
-                    net.events.push_back(NetEvent::Connected);
-                    net.events.extend(events);
-                    net.role = Role::Host(Box::new(host));
+    let mut net = state();
+    match event {
+        BridgeEvent::Start { role } if !net.seated => {
+            net.seated = true;
+            // The room creator takes red — matching the relay server,
+            // which seats the first connection red.
+            let side = match role {
+                StartRole::Host => Side::Red,
+                StartRole::Guest => Side::Green,
+                StartRole::Local => {
+                    net.seated = false;
+                    net.events.push_back(NetEvent::LocalGame);
+                    return;
                 }
-                StartRole::Guest if matches!(net.role, Role::Idle) => {
-                    net.role = Role::Guest;
-                    net.events.push_back(NetEvent::Connected);
-                }
-                StartRole::Host | StartRole::Guest => {}
-            },
-            BridgeEvent::Leave => {
-                net.role = Role::Idle;
-                net.events.push_back(NetEvent::Lobby);
-            }
-            BridgeEvent::PeerJoined { peer } => {
-                let events = if let Role::Host(host) = &mut net.role {
-                    host.peer_joined(&peer, &mut outbound)
-                } else {
-                    Vec::new()
-                };
-                net.events.extend(events);
-            }
-            BridgeEvent::PeerLeft { peer } => {
-                let events = match &mut net.role {
-                    Role::Host(host) => host.peer_left(&peer, &mut outbound),
-                    Role::Guest => vec![NetEvent::Closed {
-                        reason: "the host left the room".to_owned(),
-                    }],
-                    Role::Idle => Vec::new(),
-                };
-                net.events.extend(events);
-            }
-            BridgeEvent::Message { peer, data } => match &mut net.role {
-                Role::Host(host) => {
-                    // Guest→host traffic: client messages.
-                    match serde_json::from_value::<ClientMessage>(data) {
-                        Ok(message) => {
-                            let events = host.client_message(&peer, message, &mut outbound);
-                            net.events.extend(events);
-                        }
-                        Err(error) => eprintln!("ignoring malformed client message: {error}"),
-                    }
-                }
-                Role::Guest => {
-                    // Host→guest traffic: server messages.
-                    match serde_json::from_value::<ServerMessage>(data) {
-                        Ok(message) => net.events.push_back(NetEvent::Message(message)),
-                        Err(error) => eprintln!("ignoring malformed server message: {error}"),
-                    }
-                }
-                Role::Idle => {}
-            },
+            };
+            net.events.push_back(NetEvent::Connected { side });
         }
-    }
-    if !outbound.is_empty() {
-        let mut net = state();
-        queue_directed(&mut net.outbound, outbound);
+        BridgeEvent::Start { .. } => {}
+        BridgeEvent::Leave => {
+            net.seated = false;
+            net.peer = None;
+            net.events.push_back(NetEvent::Lobby);
+        }
+        BridgeEvent::PeerJoined { peer } => {
+            if net.seated && net.peer.is_none() {
+                net.peer = Some(peer.clone());
+            }
+            net.events.push_back(NetEvent::PeerJoined { peer: Some(peer) });
+        }
+        BridgeEvent::PeerLeft { peer } => {
+            if net.peer.as_deref() == Some(peer.as_str()) {
+                // The other seat emptied; a later joiner can reclaim it.
+                net.peer = None;
+            }
+            net.events.push_back(NetEvent::PeerLeft { peer: Some(peer) });
+        }
+        BridgeEvent::Message { data, .. } => match serde_json::from_value::<StateSync>(data) {
+            Ok(sync) => net.events.push_back(NetEvent::Sync(sync)),
+            Err(error) => eprintln!("ignoring malformed sync message: {error}"),
+        },
     }
 }

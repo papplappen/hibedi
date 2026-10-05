@@ -1,36 +1,41 @@
-//! Client networking: a WebSocket server connection on native targets and
+//! Client networking: a WebSocket relay connection on native targets and
 //! a Trystero/WebRTC bridge on wasm. Both expose the same [`NetHandle`]
 //! interface and the same [`NetEvent`] stream, so game code is
-//! transport-agnostic.
+//! transport-agnostic. Replication is symmetric: every seat plays its
+//! local game and exchanges [`StateSync`] announcements; no seat is
+//! authoritative.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
-// Hosted-room glue: only wired up on wasm, but compiled everywhere so its
-// unit tests run on native targets.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-mod host;
-
 use serde::{Deserialize, Serialize};
 
-use hibedi_core::ServerMessage;
+use hibedi_core::{Side, StateSync};
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
 // Each target never constructs the other's variants: native never emits
-// Closed/Lobby/LocalGame, wasm never emits Disconnected.
+// Closed's lobby variants, wasm never emits Disconnected.
 #[allow(dead_code)]
 pub enum NetEvent {
-    Connected,
+    /// The connection is live and our seat is assigned.
+    Connected { side: Side },
+    /// Native: the relay connection dropped; we are reconnecting.
     #[cfg(not(target_arch = "wasm32"))]
     Disconnected,
-    /// Terminal disconnect (wasm P2P only): a left peer cannot be
-    /// reconnected to automatically, so the session is over.
+    /// Terminal disconnect (native: rejected by the server; wasm: a left
+    /// peer cannot be reconnected to automatically, so the room is over).
     Closed { reason: String },
-    Message(ServerMessage),
-    /// The bridge returned to the lobby (wasm): drop any session state.
+    /// The other seat filled (or refilled after a reconnect); `peer` is
+    /// the WebRTC peer id on wasm, `None` on native.
+    PeerJoined { peer: Option<String> },
+    /// The other seat is empty; the game pauses until they return.
+    PeerLeft { peer: Option<String> },
+    /// A state announcement from the other player.
+    Sync(StateSync),
+    /// The bridge returned to the lobby (wasm): drop game state.
     #[cfg(target_arch = "wasm32")]
     Lobby,
     /// The bridge asked for a local hotseat game (wasm).
@@ -47,8 +52,10 @@ pub enum NetEvent {
 pub(crate) enum BridgeCommand {
     /// The game view is live; the bridge hides its lobby overlay.
     Ready,
+    /// The player left the game; the lobby returns to its menu.
+    Leave,
     /// Hands `data` to the room; `peer` targets one peer, `None`
-    /// broadcasts. Routing (guest→host, host→guest) is the bridge's job.
+    /// broadcasts.
     Send {
         data: serde_json::Value,
         peer: Option<String>,
@@ -59,9 +66,11 @@ pub(crate) enum BridgeCommand {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StartRole {
-    /// The lobby opened a room; this client runs the authoritative session.
+    /// The lobby opened a room; this client holds the red seat and
+    /// generates the first game when the guest arrives.
     Host,
-    /// The lobby joined a room; the host runs the session.
+    /// The lobby joined a room; this client holds the green seat and
+    /// adopts the host's state.
     Guest,
     /// No room: a local hotseat game.
     Local,
@@ -70,10 +79,10 @@ pub(crate) enum StartRole {
 /// JSON envelope for events from the JS bridge into Rust. The bridge owns
 /// the lobby (host / join / local choice and the room itself); these
 /// events hand over the connection and report its traffic. `data` is an
-/// opaque JSON value; its interpretation depends on the role. Declared on
-/// every target, driven only on wasm.
+/// opaque JSON value carrying a [`StateSync`]. Declared on every target,
+/// driven only on wasm.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, clippy::large_enum_variant)]
+#[allow(dead_code)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum BridgeEvent {
     /// The lobby decided how to run; the connection is live.
@@ -82,8 +91,7 @@ pub(crate) enum BridgeEvent {
     Leave,
     PeerJoined { peer: String },
     PeerLeft { peer: String },
-    /// A message from the room: guest→host traffic carries client
-    /// messages, host→guest traffic carries server messages.
+    /// A state announcement from the other seat.
     Message { peer: String, data: serde_json::Value },
 }
 

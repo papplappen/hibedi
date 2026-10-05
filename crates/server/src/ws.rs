@@ -8,10 +8,10 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
-use hibedi_core::{ClientMessage, ServerMessage};
+use hibedi_core::{ServerMessage, StateSync};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::session::{Claimed, Command};
+use crate::hub::{Claimed, Command, ConnId};
 
 type Outgoing = futures_util::stream::SplitSink<WebSocket, Message>;
 
@@ -34,8 +34,7 @@ async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Comman
 
     // The seat is claimed the moment the connection is upgraded: no
     // hello, no token, the next free slot belongs to whoever connects.
-    // The hub answers with the side and the welcome/state messages
-    // (already queued into `tx`).
+    // The hub answers with the side (already queued into `tx`).
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (reply_tx, reply_rx) = oneshot::channel();
     if commands
@@ -48,22 +47,16 @@ async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Comman
         return;
     }
 
-    let (side, conn) = match reply_rx.await {
-        Ok(Claimed::Seated { side, conn }) => (side, conn),
+    let conn: ConnId = match reply_rx.await {
+        Ok(Claimed::Seated { conn }) => conn,
         Ok(Claimed::Full) => {
-            let _ = send(
-                &mut outgoing,
-                &ServerMessage::Error {
-                    reason: "both seats are taken".to_owned(),
-                },
-            )
-            .await;
+            let _ = send(&mut outgoing, &ServerMessage::Full).await;
             return;
         }
         Err(_) => return,
     };
 
-    // Drain outbound state messages while the read loop below feeds commands.
+    // Drain outbound relay messages while the read loop below feeds syncs.
     tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
             if send(&mut outgoing, &message).await.is_err() {
@@ -74,29 +67,21 @@ async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Comman
 
     while let Some(Ok(message)) = incoming.next().await {
         match message {
-            Message::Text(text) => match serde_json::from_str::<ClientMessage>(text.as_str()) {
-                Ok(client_message) => {
-                    let _ = commands.send(Command::Message {
-                        side,
-                        msg: client_message,
-                    });
+            Message::Text(text) => {
+                if let Ok(sync) = serde_json::from_str::<StateSync>(text.as_str()) {
+                    let _ = commands.send(Command::Sync { from: conn, sync });
                 }
-                Err(_) => {
-                    let _ = tx.send(ServerMessage::Error {
-                        reason: "malformed message".to_owned(),
-                    });
-                }
-            },
+            }
             Message::Close(_) => break,
             _ => {}
         }
     }
 
-    let _ = commands.send(Command::Disconnect { side, conn });
+    let _ = commands.send(Command::Disconnect { conn });
 }
 
 async fn send(outgoing: &mut Outgoing, message: &ServerMessage) -> Result<(), ()> {
-    let text = serde_json::to_string(message).expect("server messages always serialize");
+    let text = serde_json::to_string(message).expect("relay messages always serialize");
     outgoing
         .send(Message::Text(text.into()))
         .await

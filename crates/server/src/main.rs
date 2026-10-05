@@ -1,4 +1,4 @@
-mod session;
+mod hub;
 mod ws;
 
 use tokio::sync::mpsc;
@@ -10,7 +10,7 @@ async fn main() {
     let bind = bind_address();
 
     let (commands, receiver) = mpsc::unbounded_channel();
-    tokio::spawn(session::run(receiver));
+    tokio::spawn(hub::run(receiver));
 
     let app = ws::router(commands);
     let listener = tokio::net::TcpListener::bind(&bind)

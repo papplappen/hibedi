@@ -1,11 +1,12 @@
 //! Native transport: a background thread speaking JSON over a WebSocket
-//! to the dedicated server (crates/server).
+//! to the relay server (crates/server). The relay assigns our seat and
+//! forwards state announcements between the two seats.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use hibedi_core::ClientMessage;
+use hibedi_core::{ServerMessage, StateSync};
 
 use super::NetEvent;
 
@@ -14,7 +15,7 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 pub struct NetHandle {
-    commands: Sender<ClientMessage>,
+    syncs: Sender<StateSync>,
     events: Receiver<NetEvent>,
 }
 
@@ -23,24 +24,27 @@ impl NetHandle {
         self.events.try_recv().ok()
     }
 
-    pub fn send(&self, message: ClientMessage) {
-        let _ = self.commands.send(message);
+    /// Publishes a state announcement; the relay forwards it to the other
+    /// seat. The `peer` targeting of the wasm transport does not exist
+    /// here: the relay always knows both seats.
+    pub fn announce(&self, sync: &StateSync, _peer: Option<&str>) {
+        let _ = self.syncs.send(sync.clone());
     }
 }
 
 pub fn spawn(url: String) -> NetHandle {
-    let (command_tx, command_rx) = mpsc::channel();
+    let (sync_tx, sync_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
 
-    thread::spawn(move || run(url, command_rx, event_tx));
+    thread::spawn(move || run(url, sync_rx, event_tx));
 
     NetHandle {
-        commands: command_tx,
+        syncs: sync_tx,
         events: event_rx,
     }
 }
 
-fn run(url: String, command_rx: Receiver<ClientMessage>, event_tx: mpsc::Sender<NetEvent>) {
+fn run(url: String, sync_rx: Receiver<StateSync>, event_tx: mpsc::Sender<NetEvent>) {
     let mut backoff = INITIAL_BACKOFF;
 
     loop {
@@ -51,40 +55,11 @@ fn run(url: String, command_rx: Receiver<ClientMessage>, event_tx: mpsc::Sender<
                     let _ = stream.set_nodelay(true);
                 }
 
-                // The server seats us the moment we connect; no hello is
-                // exchanged.
                 backoff = INITIAL_BACKOFF;
-                let _ = event_tx.send(NetEvent::Connected);
-
-                'connected: loop {
-                    while let Ok(message) = command_rx.try_recv() {
-                        if send_json(&mut socket, &message).is_err() {
-                            break 'connected;
-                        }
-                    }
-
-                    match socket.read() {
-                        Ok(tungstenite::Message::Text(text)) => {
-                            if let Ok(message) =
-                                serde_json::from_str::<hibedi_core::ServerMessage>(text.as_str())
-                            {
-                                let _ = event_tx.send(NetEvent::Message(message));
-                            }
-                        }
-                        Ok(tungstenite::Message::Close(_)) => break 'connected,
-                        Err(tungstenite::Error::Io(error))
-                            if error.kind() == std::io::ErrorKind::WouldBlock
-                                || error.kind() == std::io::ErrorKind::TimedOut => {}
-                        Err(
-                            tungstenite::Error::ConnectionClosed
-                            | tungstenite::Error::AlreadyClosed,
-                        ) => break 'connected,
-                        Err(_) => break 'connected,
-                        Ok(_) => {}
-                    }
+                if matches!(pump(&mut socket, &sync_rx, &event_tx), Flow::Stop) {
+                    // Rejected by the relay: there is no seat to retry for.
+                    return;
                 }
-
-                let _ = event_tx.send(NetEvent::Disconnected);
             }
             Err(_) => {
                 let _ = event_tx.send(NetEvent::Disconnected);
@@ -96,14 +71,81 @@ fn run(url: String, command_rx: Receiver<ClientMessage>, event_tx: mpsc::Sender<
     }
 }
 
+enum Flow {
+    Continue,
+    Stop,
+}
+
+/// One connected session: relays our announcements out and the server's
+/// messages in until the connection drops.
+fn pump(
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    sync_rx: &Receiver<StateSync>,
+    event_tx: &mpsc::Sender<NetEvent>,
+) -> Flow {
+    loop {
+        while let Ok(sync) = sync_rx.try_recv() {
+            if send_json(socket, &ServerMessage::Sync(sync)).is_err() {
+                return drop_connection(event_tx);
+            }
+        }
+
+        match socket.read() {
+            Ok(tungstenite::Message::Text(text)) => {
+                match serde_json::from_str::<ServerMessage>(text.as_str()) {
+                    Ok(message) => {
+                        #[cfg(debug_assertions)]
+                        eprintln!("relay in: {message:?}");
+                        match message {
+                            ServerMessage::Hello { side } => {
+                                let _ = event_tx.send(NetEvent::Connected { side });
+                            }
+                            ServerMessage::PeerJoined => {
+                                let _ = event_tx.send(NetEvent::PeerJoined { peer: None });
+                            }
+                            ServerMessage::PeerLeft => {
+                                let _ = event_tx.send(NetEvent::PeerLeft { peer: None });
+                            }
+                            ServerMessage::Sync(sync) => {
+                                let _ = event_tx.send(NetEvent::Sync(sync));
+                            }
+                            ServerMessage::Full => {
+                                let _ = event_tx.send(NetEvent::Closed {
+                                    reason: "the relay server is full".to_owned(),
+                                });
+                                return Flow::Stop;
+                            }
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            Ok(tungstenite::Message::Close(_)) => return drop_connection(event_tx),
+            Err(tungstenite::Error::Io(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                return drop_connection(event_tx)
+            }
+            Err(_) => return drop_connection(event_tx),
+            Ok(_) => {}
+        }
+    }
+}
+
+fn drop_connection(event_tx: &mpsc::Sender<NetEvent>) -> Flow {
+    let _ = event_tx.send(NetEvent::Disconnected);
+    Flow::Continue
+}
+
 fn next_backoff(current: Duration) -> Duration {
     (current.saturating_mul(2)).min(MAX_BACKOFF)
 }
 
 fn send_json(
     socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
-    message: &ClientMessage,
+    message: &ServerMessage,
 ) -> Result<(), tungstenite::Error> {
-    let json = serde_json::to_string(message).expect("client messages always serialize");
+    let json = serde_json::to_string(message).expect("relay messages always serialize");
     socket.send(tungstenite::Message::Text(json.into()))
 }

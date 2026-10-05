@@ -84,6 +84,8 @@ const lobby = createLobby({
 function handleCommand(command) {
   if (command.type === 'ready') {
     lobby.hide()
+  } else if (command.type === 'leave') {
+    lobby.leave('you left the game')
   } else if (command.type === 'send') {
     connection?.send(command.data, command.peer ?? undefined)
   }
