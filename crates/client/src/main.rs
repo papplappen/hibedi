@@ -1,5 +1,7 @@
 mod net;
 
+use std::sync::OnceLock;
+
 use hibedi_core::{
     BOARD_HEIGHT, BOARD_WIDTH, Cell, Coord, Game, GameResult, Phase, Replica, Side, StateSync,
     WinReason,
@@ -18,7 +20,89 @@ const TOKEN_FILL: Color = Color::from_rgba(24, 31, 43, 255);
 const TOKEN_EDGE: Color = Color::from_rgba(239, 236, 220, 255);
 const GOLD: Color = Color::from_rgba(194, 137, 38, 255);
 const CYAN: Color = Color::from_rgba(33, 139, 154, 255);
+/// Outline marking the viewer's own cells (online only).
+const OWN_EDGE: Color = Color::from_rgba(245, 242, 232, 255);
 const MUTED: Color = Color::from_rgba(169, 178, 191, 255);
+
+/// Screen padding around the whole play area.
+const PAD: f32 = 24.0;
+/// Height of the header band (title + turn chip) above the play area.
+const HEAD: f32 = 64.0;
+/// Gap between the board and the info panel.
+const GAP: f32 = 24.0;
+/// Info panel width when it sits beside the board.
+const PANEL_W: f32 = 280.0;
+/// Info panel height; the content layout below is designed for this.
+const PANEL_H: f32 = 248.0;
+/// A side panel narrower than this is not worth the board width it
+/// costs; stack the panel below the board instead.
+const MIN_PANEL_W: f32 = 220.0;
+
+/// Embedded UI fonts (SIL OFL — see `assets/OFL.txt`). Atkinson
+/// Hyperlegible is a legibility-first typeface; swap the files to change
+/// the look. Unlike the built-in font these rasterize anti-aliased at
+/// every size.
+struct Ui {
+    regular: Font,
+    bold: Font,
+}
+
+static UI: OnceLock<Ui> = OnceLock::new();
+
+impl Ui {
+    fn load() -> Self {
+        Self {
+            regular: load_ttf_font_from_bytes(include_bytes!(
+                "../assets/AtkinsonHyperlegible-Regular.ttf"
+            ))
+            .expect("embedded font parses"),
+            bold: load_ttf_font_from_bytes(include_bytes!(
+                "../assets/AtkinsonHyperlegible-Bold.ttf"
+            ))
+            .expect("embedded font parses"),
+        }
+    }
+}
+
+fn ui() -> &'static Ui {
+    UI.get().expect("ui fonts are loaded in main")
+}
+
+fn text(text: &str, x: f32, y: f32, size: f32, color: Color) {
+    draw_text_ex(
+        text,
+        x,
+        y,
+        TextParams {
+            font: Some(&ui().regular),
+            font_size: size as u16,
+            color,
+            ..Default::default()
+        },
+    );
+}
+
+fn bold_text(text: &str, x: f32, y: f32, size: f32, color: Color) {
+    draw_text_ex(
+        text,
+        x,
+        y,
+        TextParams {
+            font: Some(&ui().bold),
+            font_size: size as u16,
+            color,
+            ..Default::default()
+        },
+    );
+}
+
+fn text_width(text: &str, size: f32) -> f32 {
+    measure_text(text, Some(&ui().regular), size as u16, 1.0).width
+}
+
+fn bold_text_width(text: &str, size: f32) -> f32 {
+    measure_text(text, Some(&ui().bold), size as u16, 1.0).width
+}
 
 struct BoardLayout {
     x: f32,
@@ -26,7 +110,6 @@ struct BoardLayout {
     cell_size: f32,
     storage_width: usize,
     storage_height: usize,
-    compact: bool,
 }
 
 impl BoardLayout {
@@ -278,6 +361,29 @@ impl GameView {
         }
     }
 
+    /// UX shortcut: with exactly one selectable token there is nothing
+    /// to choose, so activate it immediately instead of demanding a
+    /// click. Runs after click handling so a deliberate selection click
+    /// wins over the automatic one.
+    fn auto_advance(&mut self) {
+        if !self.can_play() {
+            return;
+        }
+        let Some(game) = &mut self.game else {
+            return;
+        };
+        if game.phase() != Phase::ChooseActivatedToken {
+            return;
+        }
+        let selectable = game.selectable_activated_tokens();
+        if let [only] = selectable.as_slice() {
+            let id = *only;
+            if game.try_select_activated_token(id) && let Some(online) = &mut self.net {
+                online.announce(Some(game));
+            }
+        }
+    }
+
     /// Starts a fresh game and announces it; simultaneous resets
     /// converge deterministically (see `Replica`).
     fn reset(&mut self) {
@@ -437,6 +543,25 @@ fn new_local_game() -> Game {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    // The embedded UI fonts must load after macroquad's GPU context is
+    // up; everything drawn afterwards goes through them.
+    let _ = UI.set(Ui::load());
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Conf sizes are physical window pixels, while the UI is laid out
+        // in logical units (macroquad divides by the DPI scale). On hidpi
+        // screens, enlarge the window once so the logical workspace matches
+        // the ~1152×768 design the layout constants assume.
+        let scale = macroquad::miniquad::window::dpi_scale();
+        if scale > 1.01 {
+            macroquad::miniquad::window::set_window_size(
+                (1152.0 * scale) as u32,
+                (768.0 * scale) as u32,
+            );
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     let mut mode = {
         let args = parse_args();
@@ -479,14 +604,12 @@ async fn main() {
             }
         }
 
-        let (storage_width, storage_height) = mode.storage_dims();
-        let layout = board_layout(storage_width, storage_height);
-        let buttons = buttons_for(&mode, &layout);
+        let layout = layout(&mode);
 
         // Input, possibly switching modes.
         if transition.is_none() {
             match &mut mode {
-                Mode::Game(view) => handle_input(view, &layout, &buttons),
+                Mode::Game(view) => handle_input(view, &layout),
                 #[cfg(target_arch = "wasm32")]
                 Mode::Lobby => {}
             }
@@ -496,7 +619,7 @@ async fn main() {
         }
 
         clear_background(BACKGROUND);
-        draw_scene(&mode, &layout, &buttons);
+        draw_scene(&mode, &layout);
 
         next_frame().await;
     }
@@ -519,7 +642,7 @@ fn lobby_update() -> Option<Mode> {
 
 /// Hotseat input, identical for local and online play: online play only
 /// adds the announcement of applied actions (see [`GameView::click`]).
-fn handle_input(view: &mut GameView, layout: &BoardLayout, buttons: &Buttons) {
+fn handle_input(view: &mut GameView, layout: &Layout) {
     let clicked = is_mouse_button_pressed(MouseButton::Left);
     let mouse: Vec2 = mouse_position().into();
 
@@ -527,22 +650,25 @@ fn handle_input(view: &mut GameView, layout: &BoardLayout, buttons: &Buttons) {
     if is_key_pressed(KeyCode::R) && (view.net.is_none() || view.wants_reset()) {
         view.reset();
     } else if clicked {
-        if let Some(rect) = buttons.primary
+        if let Some(rect) = layout.buttons.primary
             && point_in_rect(mouse, rect)
             && view.wants_reset()
         {
             view.reset();
-        } else if let Some(rect) = buttons.leave
+        } else if let Some(rect) = layout.buttons.leave
             && point_in_rect(mouse, rect)
             && view.wants_leave()
         {
             view.leave();
         } else if view.can_play()
-            && let Some(coord) = layout.coord_at(mouse)
+            && let Some(coord) = layout.board.coord_at(mouse)
         {
             view.click(coord);
         }
     }
+
+    // A lone selectable token activates without demanding a click.
+    view.auto_advance();
 }
 
 /// Applies a board click the way a hotseat click works; returns whether
@@ -550,7 +676,15 @@ fn handle_input(view: &mut GameView, layout: &BoardLayout, buttons: &Buttons) {
 fn handle_local_click(game: &mut Game, coord: Coord) -> bool {
     match game.phase() {
         Phase::PlaceInitialToken => game.try_place_initial_token(coord),
-        Phase::ChooseJump => game.try_jump_to(coord),
+        Phase::ChooseJump => {
+            // A landing click hops; a click on another glowing token
+            // switches the selection (allowed until the first hop).
+            game.try_jump_to(coord)
+                || game
+                    .board()
+                    .token_at(coord)
+                    .is_some_and(|token| game.try_select_activated_token(token))
+        }
         Phase::ChooseActivatedToken => {
             let token = game.board().token_at(coord);
             token.is_some_and(|token| game.try_select_activated_token(token))
@@ -559,118 +693,110 @@ fn handle_local_click(game: &mut Game, coord: Coord) -> bool {
     }
 }
 
-fn board_layout(storage_width: usize, storage_height: usize) -> BoardLayout {
-    let compact = screen_width() < 820.0 || screen_width() / screen_height() < 1.15;
-    let horizontal_padding = 26.0;
-    let top = 70.0;
-    let bottom = if compact { 180.0 } else { 36.0 };
-    let side_reserve = if compact { 0.0 } else { 292.0 };
-    let available_width = (screen_width() - horizontal_padding * 2.0 - side_reserve).max(120.0);
-    let available_height = (screen_height() - top - bottom).max(120.0);
-    let cell_size = (available_width / storage_width as f32)
-        .min(available_height / storage_height as f32)
-        .max(10.0);
-    let board_width = cell_size * storage_width as f32;
-
-    BoardLayout {
-        x: if compact {
-            (screen_width() - board_width) / 2.0
-        } else {
-            horizontal_padding
-        },
-        y: top + (available_height - cell_size * storage_height as f32) / 2.0,
-        cell_size,
-        storage_width,
-        storage_height,
-        compact,
-    }
+/// The whole screen arrangement, computed once per frame from the
+/// window size and the current mode. Two candidates are evaluated and
+/// the one giving the board more room wins:
+///
+/// - *side*: the board is centered in the window and the panel sits in
+///   the right margin (needs enough margin width),
+/// - *stacked*: the board is centered with the panel below it.
+struct Layout {
+    board: BoardLayout,
+    panel: Rect,
+    buttons: Buttons,
 }
 
-fn buttons_for(mode: &Mode, layout: &BoardLayout) -> Buttons {
-    match mode {
-        Mode::Game(view) => match &view.net {
-            None => Buttons {
-                primary: Some(desktop_or_compact_rect(layout, 438.0)),
-                leave: None,
-            },
-            Some(_) => Buttons {
-                primary: view.wants_reset().then(|| {
-                    if layout.compact {
-                        compact_button_rect(layout, 0.0)
-                    } else {
-                        desktop_or_compact_rect(layout, 420.0)
-                    }
-                }),
-                leave: view
-                    .wants_leave()
-                    .then(|| leave_rect(layout, view.wants_reset())),
-            },
-        },
+fn layout(mode: &Mode) -> Layout {
+    let (storage_width, storage_height) = mode.storage_dims();
+    let screen = vec2(screen_width(), screen_height());
+    let band_y = HEAD + PAD;
+    let band_h = (screen.y - band_y - PAD).max(120.0);
+    let avail_w = (screen.x - PAD * 2.0).max(120.0);
+
+    // Side candidate: the panel must fit into the right margin of a
+    // board centered in the full window.
+    let side_cell = ((avail_w - 2.0 * (PAD + PANEL_W + GAP)) / storage_width as f32)
+        .min(band_h / storage_height as f32)
+        .max(10.0);
+    let side_margin = (screen.x - side_cell * storage_width as f32) / 2.0;
+    let side_panel_w = (PANEL_W).min(side_margin - GAP - PAD);
+
+    // Stacked candidate: the panel takes a fixed slice of the band.
+    let stack_cell = (avail_w / storage_width as f32)
+        .min((band_h - PANEL_H - GAP) / storage_height as f32)
+        .max(10.0);
+
+    let side = side_panel_w >= MIN_PANEL_W && side_cell >= stack_cell;
+    let cell = if side { side_cell } else { stack_cell };
+    let board_size = vec2(cell * storage_width as f32, cell * storage_height as f32);
+    // Everything hangs from the top of the content band; no vertical
+    // centering.
+    let board = BoardLayout {
+        x: (screen.x - board_size.x) / 2.0,
+        y: band_y,
+        cell_size: cell,
+        storage_width,
+        storage_height,
+    };
+
+    let panel = if side {
+        Rect::new(board.x + board_size.x + GAP, band_y, side_panel_w, PANEL_H)
+    } else {
+        let width = avail_w.min(460.0);
+        Rect::new(
+            (screen.x - width) / 2.0,
+            band_y + board_size.y + GAP,
+            width,
+            PANEL_H,
+        )
+    };
+
+    // The buttons live in the panel's bottom row; each keeps its slot
+    // whether or not it is currently shown (no layout jitter).
+    let slot_w = (panel.w - 40.0 - 12.0) / 2.0;
+    let slot_y = panel.y + panel.h - 50.0;
+    let slot = Rect::new(panel.x + 20.0, slot_y, slot_w, 38.0);
+    let buttons = match mode {
+        Mode::Game(view) => buttons_for(view, slot, slot_w),
         #[cfg(target_arch = "wasm32")]
         Mode::Lobby => Buttons {
             primary: None,
             leave: None,
         },
-    }
-}
-
-fn desktop_or_compact_rect(layout: &BoardLayout, desktop_y: f32) -> Rect {
-    if layout.compact {
-        compact_button_rect(layout, 0.0)
-    } else {
-        Rect::new(
-            layout.x + layout.board_width() + 28.0,
-            desktop_y,
-            190.0,
-            36.0,
-        )
-    }
-}
-
-fn compact_button_rect(layout: &BoardLayout, offset: f32) -> Rect {
-    Rect::new(
-        screen_width() - 130.0,
-        layout.y + layout.board_height() + 89.0 + offset,
-        108.0,
-        34.0,
-    )
-}
-
-fn leave_rect(layout: &BoardLayout, primary_visible: bool) -> Rect {
-    if layout.compact {
-        compact_button_rect(layout, if primary_visible { 39.0 } else { 0.0 })
-    } else {
-        Rect::new(layout.x + layout.board_width() + 28.0, 464.0, 190.0, 36.0)
-    }
-}
-
-/// The centered panel behind the waiting screen (native only).
-#[cfg(not(target_arch = "wasm32"))]
-fn waiting_panel_rect(layout: &BoardLayout) -> Rect {
-    let width = if layout.compact {
-        screen_width() - 48.0
-    } else {
-        560.0
     };
-    let height = 210.0;
-    let x = (screen_width() - width) / 2.0;
-    let y = ((screen_height() - height) / 2.0 - 10.0).max(90.0);
-    Rect::new(x, y, width, height)
+
+    Layout {
+        board,
+        panel,
+        buttons,
+    }
 }
 
-fn draw_scene(mode: &Mode, layout: &BoardLayout, buttons: &Buttons) {
+fn buttons_for(view: &GameView, slot: Rect, slot_w: f32) -> Buttons {
+    let leave_slot = Rect::new(slot.x + slot_w + 12.0, slot.y, slot_w, slot.h);
+    Buttons {
+        primary: view.wants_reset().then_some(slot),
+        leave: view.wants_leave().then_some(leave_slot),
+    }
+}
+
+fn draw_scene(mode: &Mode, layout: &Layout) {
     match mode {
         Mode::Game(view) => {
-            let connected = view.net.as_ref().is_none_or(|online| online.connected);
-            draw_header(view.game.as_ref(), view.side, connected, layout);
+            draw_header(view);
             if let Some(game) = &view.game {
-                draw_board(game, layout);
-                draw_panel(game, layout, buttons, view);
+                // Hints (cyan/gold markers) reveal what the current
+                // player can do: always in hotseat, online only while
+                // it is actually our turn.
+                let show_hints =
+                    view.net.is_none() || view.side == Some(game.current_player());
+                draw_board(game, &layout.board, show_hints, view.side);
+                draw_panel(game, layout, view);
             } else {
                 // Wasm: the lobby overlay covers the screen until the
                 // first game state arrives; native draws a waiting panel.
                 #[cfg(not(target_arch = "wasm32"))]
-                draw_waiting(view, layout);
+                draw_waiting(view);
             }
         }
         // Wasm: the lobby overlay owns the screen; draw nothing.
@@ -679,48 +805,38 @@ fn draw_scene(mode: &Mode, layout: &BoardLayout, buttons: &Buttons) {
     }
 }
 
-fn draw_header(game: Option<&Game>, my_side: Option<Side>, connected: bool, layout: &BoardLayout) {
-    let narrow = screen_width() < 430.0;
-    let title = if narrow { "HOPEDI" } else { "HIBE DI HOPEDI" };
-    let title_size = if layout.compact { 22.0 } else { 34.0 };
-    draw_text(title, 26.0, 37.0, title_size, WHITE);
-    if !layout.compact {
-        draw_text("A forced-hop territory prototype", 28.0, 57.0, 15.0, MUTED);
+/// Title plus, online only, a chip that appears while the link needs
+/// attention. A healthy room stays quiet: whose turn it is is visible
+/// on the board itself, and who we are is visible on the board and in
+/// the score (own cells/score are marked).
+fn draw_header(view: &GameView) {
+    let width = screen_width();
+    let title_size = if width < 460.0 { 20.0 } else { 26.0 };
+    bold_text("HIBE DI HOPEDI", PAD + 2.0, 38.0, title_size, WHITE);
+    if width >= 700.0 {
+        text("A forced-hop territory prototype", PAD + 4.0, 58.0, 14.0, MUTED);
     }
 
-    let (turn, turn_color) = header_chip(game, my_side, connected);
-    let width = measure_text(&turn, None, 18, 1.0).width + 24.0;
-    let x = screen_width() - width - 26.0;
-    draw_round_rect(x, 18.0, width, 31.0, 10.0, turn_color);
-    draw_text(&turn, x + 12.0, 39.5, 18.0, WHITE);
+    // Connection chip: only while something is wrong and a game is on
+    // screen (the waiting screen has its own messaging).
+    let Some(online) = &view.net else {
+        return;
+    };
+    if view.game.is_none() || (online.connected && online.opponent_present) {
+        return;
+    }
+    let label = if online.connected {
+        "Opponent disconnected"
+    } else {
+        "Reconnecting…"
+    };
+    let chip_w = bold_text_width(label, 15.0) + 24.0;
+    let x = width - chip_w - PAD;
+    draw_round_rect(x, 16.0, chip_w, 30.0, 10.0, PANEL_EDGE);
+    bold_text(label, x + 12.0, 36.0, 15.0, WHITE);
 }
 
-fn header_chip(game: Option<&Game>, my_side: Option<Side>, connected: bool) -> (String, Color) {
-    if !connected {
-        return ("Reconnecting…".to_owned(), PANEL_EDGE);
-    }
-
-    let Some(game) = game else {
-        return ("Waiting…".to_owned(), GOLD);
-    };
-
-    if let Some(result) = game.result() {
-        return match result {
-            GameResult::Winner { side, .. } => (format!("{} wins", side.label()), side_color(side)),
-            GameResult::Draw => ("Draw".to_owned(), PANEL_EDGE),
-        };
-    }
-
-    let current = game.current_player();
-    let label = match my_side {
-        Some(me) if me == current => format!("Your turn ({})", current.label()),
-        Some(_) => format!("Opponent ({})", current.label()),
-        None => format!("{} to move", current.label()),
-    };
-    (label, side_color(current))
-}
-
-fn draw_board(game: &Game, layout: &BoardLayout) {
+fn draw_board(game: &Game, layout: &BoardLayout, show_hints: bool, my_side: Option<Side>) {
     let initial_placements = game.legal_initial_placements();
     let jumps = game.legal_current_jumps();
     let selectable_tokens = game.selectable_activated_tokens();
@@ -756,7 +872,22 @@ fn draw_board(game: &Game, layout: &BoardLayout) {
                 );
             }
 
-            if initial_placements.contains(&coord) {
+            // Mark the viewer's own territory (online only): a light
+            // border around every field of our color.
+            if my_side.is_some_and(|my| game.board().cell_at(coord).and_then(Cell::side) == Some(my))
+            {
+                let inset = (rect.w * 0.05).clamp(2.0, 5.0);
+                draw_rectangle_lines(
+                    rect.x + inset,
+                    rect.y + inset,
+                    rect.w - inset * 2.0,
+                    rect.h - inset * 2.0,
+                    (rect.w * 0.055).clamp(3.0, 6.0),
+                    OWN_EDGE,
+                );
+            }
+
+            if show_hints && initial_placements.contains(&coord) {
                 let inset = (rect.w * 0.11).clamp(2.0, 6.0);
                 draw_rectangle_lines(
                     rect.x + inset,
@@ -774,7 +905,7 @@ fn draw_board(game: &Game, layout: &BoardLayout) {
                 );
             }
 
-            if jumps.iter().any(|jump| jump.landing == coord) {
+            if show_hints && jumps.iter().any(|jump| jump.landing == coord) {
                 let inset = (rect.w * 0.09).clamp(2.0, 6.0);
                 draw_rectangle_lines(
                     rect.x + inset,
@@ -799,7 +930,7 @@ fn draw_board(game: &Game, layout: &BoardLayout) {
         let center = vec2(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         let radius = rect.w * 0.27;
         let is_current = current_token == Some(token.id);
-        let is_selectable = selectable_tokens.contains(&token.id);
+        let is_selectable = show_hints && selectable_tokens.contains(&token.id);
         let is_pending = game.pending_activated_tokens().contains(&token.id);
 
         if is_selectable {
@@ -826,105 +957,47 @@ fn draw_board(game: &Game, layout: &BoardLayout) {
     }
 }
 
-fn draw_panel(game: &Game, layout: &BoardLayout, buttons: &Buttons, view: &GameView) {
-    let (x, y, width) = if layout.compact {
-        (
-            22.0,
-            layout.y + layout.board_height() + 22.0,
-            screen_width() - 44.0,
-        )
-    } else {
-        (
-            layout.x + layout.board_width() + 28.0,
-            86.0,
-            screen_width() - (layout.x + layout.board_width() + 54.0),
-        )
-    };
-    let height = if layout.compact {
-        146.0
-    } else if view.net.is_some() {
-        448.0
-    } else {
-        396.0
-    };
+fn draw_panel(game: &Game, layout: &Layout, view: &GameView) {
+    let panel = layout.panel;
+    draw_round_rect(panel.x, panel.y, panel.w, panel.h, 16.0, PANEL);
+    draw_rectangle_lines(panel.x, panel.y, panel.w, panel.h, 16.0, PANEL_EDGE);
 
-    draw_round_rect(x, y, width, height, 16.0, PANEL);
-    draw_rectangle_lines(x, y, width, height, 16.0, PANEL_EDGE);
+    let x = panel.x + 20.0;
+    let width = panel.w - 40.0;
 
     let (red, green) = game.board().colored_counts();
-    draw_text("BOARD STATE", x + 18.0, y + 29.0, 16.0, MUTED);
-    draw_count_row(x + 18.0, y + 58.0, "RED", red, RED_CELL);
-    draw_count_row(x + 18.0, y + 84.0, "GREEN", green, GREEN_CELL);
+    draw_count_chip(x, panel.y + 40.0, "Red", red, RED_CELL, view.side == Some(Side::Red));
+    draw_count_chip(
+        x + width / 2.0,
+        panel.y + 40.0,
+        "Green",
+        green,
+        GREEN_CELL,
+        view.side == Some(Side::Green),
+    );
+    draw_line(
+        x,
+        panel.y + 62.0,
+        x + width,
+        panel.y + 62.0,
+        1.0,
+        PANEL_EDGE,
+    );
 
     let status = match &view.net {
         None => status_text(game),
         Some(online) => online_status_text(online, game),
     };
+    draw_wrapped_text(&status, x, panel.y + 94.0, width, 24.0, 17.0, WHITE);
 
-    if !layout.compact {
-        draw_line(
-            x + 18.0,
-            y + 106.0,
-            x + width - 18.0,
-            y + 106.0,
-            1.0,
-            PANEL_EDGE,
-        );
-        draw_text("CURRENT ACTION", x + 18.0, y + 135.0, 16.0, MUTED);
-        draw_wrapped_text(
-            &status,
-            x + 18.0,
-            y + 161.0,
-            width - 36.0,
-            20.0,
-            18.0,
-            WHITE,
-        );
-        draw_text(
-            "Every available jump is compulsory.",
-            x + 18.0,
-            y + 266.0,
-            15.0,
-            MUTED,
-        );
-        draw_text(
-            "Gold: legal landing / active token",
-            x + 18.0,
-            y + 291.0,
-            15.0,
-            MUTED,
-        );
-        draw_text(
-            "Cyan: legal placement / moving token",
-            x + 18.0,
-            y + 314.0,
-            15.0,
-            MUTED,
-        );
-
-        if !view.net.is_none() {
-            draw_online_lines(view, x + 18.0, y + 344.0);
-        }
-    } else {
-        draw_wrapped_text(
-            &status,
-            x + 18.0,
-            y + 113.0,
-            width - 148.0,
-            18.0,
-            15.0,
-            WHITE,
-        );
-    }
-
-    if let Some(rect) = buttons.primary {
+    if let Some(rect) = layout.buttons.primary {
         let finished = view.net.is_none() && game.phase() == Phase::GameOver;
         draw_button(
             rect,
-            if layout.compact || view.net.is_some() {
-                "NEW GAME"
-            } else {
+            if view.net.is_none() {
                 "NEW GAME  R"
+            } else {
+                "NEW GAME"
             },
             if finished || view.net.is_some() {
                 GOLD
@@ -933,41 +1006,35 @@ fn draw_panel(game: &Game, layout: &BoardLayout, buttons: &Buttons, view: &GameV
             },
         );
     }
-
-    if let Some(rect) = buttons.leave {
+    if let Some(rect) = layout.buttons.leave {
         draw_button(rect, "LEAVE GAME", PANEL_EDGE);
     }
 }
 
-fn draw_online_lines(view: &GameView, x: f32, y: f32) {
-    let online = match &view.net {
-        Some(online) => online,
-        None => return,
-    };
-    let you = match view.side {
-        Some(side) => format!("You are {}", side.label()),
-        None => "Not seated yet".to_owned(),
-    };
-    draw_circle(x + 6.0, y - 5.0, 6.0, view.side.map_or(MUTED, side_color));
-    draw_text(&you, x + 20.0, y, 15.0, WHITE);
-
-    let connection = if !online.connected {
-        "Reconnecting…"
-    } else if online.opponent_present {
-        "Opponent connected"
-    } else {
-        "Opponent disconnected"
-    };
-    draw_text(connection, x + 20.0, y + 24.0, 15.0, MUTED);
+/// One score entry: colored dot, label, count. The viewer's own side
+/// (online only) gets a backdrop and a ringed dot so ownership reads at
+/// a glance.
+fn draw_count_chip(x: f32, y: f32, label: &str, count: usize, color: Color, mine: bool) {
+    if mine {
+        let count_width = bold_text_width(&count.to_string(), 19.0);
+        let w = 76.0 + count_width + 14.0;
+        draw_round_rect(x - 10.0, y - 20.0, w, 40.0, 10.0, PANEL_EDGE);
+    }
+    draw_circle(x + 6.0, y - 5.0, 6.0, color);
+    if mine {
+        draw_circle_lines(x + 6.0, y - 5.0, 9.0, 2.0, OWN_EDGE);
+    }
+    bold_text(label, x + 18.0, y, 16.0, WHITE);
+    bold_text(&count.to_string(), x + 76.0, y, 19.0, WHITE);
 }
 
 fn draw_button(rect: Rect, label: &str, fill: Color) {
     draw_round_rect(rect.x, rect.y, rect.w, rect.h, 9.0, fill);
-    let text = measure_text(label, None, 15, 1.0);
-    draw_text(
+    let text_width = bold_text_width(label, 15.0);
+    bold_text(
         label,
-        rect.x + (rect.w - text.width) / 2.0,
-        rect.y + 24.0,
+        rect.x + (rect.w - text_width) / 2.0,
+        rect.y + rect.h / 2.0 + 5.5,
         15.0,
         WHITE,
     );
@@ -975,8 +1042,15 @@ fn draw_button(rect: Rect, label: &str, fill: Color) {
 
 /// The native waiting screen (the wasm lobby overlay covers this case).
 #[cfg(not(target_arch = "wasm32"))]
-fn draw_waiting(view: &GameView, layout: &BoardLayout) {
-    let panel = waiting_panel_rect(layout);
+fn draw_waiting(view: &GameView) {
+    let width = (screen_width() - 48.0).min(560.0);
+    let height = 210.0;
+    let panel = Rect::new(
+        (screen_width() - width) / 2.0,
+        ((screen_height() - height) / 2.0 - 10.0).max(90.0),
+        width,
+        height,
+    );
     draw_round_rect(panel.x, panel.y, panel.w, panel.h, 18.0, PANEL);
     draw_rectangle_lines(panel.x, panel.y, panel.w, panel.h, 18.0, PANEL_EDGE);
 
@@ -1001,8 +1075,8 @@ fn draw_waiting(view: &GameView, layout: &BoardLayout) {
         )
     };
 
-    let title_width = measure_text(&title, None, 24, 1.0).width;
-    draw_text(
+    let title_width = bold_text_width(&title, 24.0);
+    bold_text(
         &title,
         panel.x + (panel.w - title_width) / 2.0,
         panel.y + 74.0,
@@ -1031,13 +1105,6 @@ fn online_status_text(online: &Online, game: &Game) -> String {
     status_text(game)
 }
 
-fn draw_count_row(x: f32, y: f32, label: &str, count: usize, color: Color) {
-    draw_circle(x + 6.0, y - 5.0, 6.0, color);
-    draw_text(label, x + 20.0, y, 16.0, WHITE);
-    let count = count.to_string();
-    draw_text(&count, x + 104.0, y, 19.0, WHITE);
-}
-
 fn status_text(game: &Game) -> String {
     match game.phase() {
         Phase::PlaceInitialToken => {
@@ -1047,12 +1114,12 @@ fn status_text(game: &Game) -> String {
             )
         }
         Phase::ChooseJump => {
-            "Choose a gold landing cell. Continue until this token is blocked.".to_owned()
+            "Keep hopping — every available jump is compulsory.".to_owned()
         }
         Phase::ChooseActivatedToken => {
             let options = game.selectable_activated_tokens().len();
             format!(
-                "Choose one of {options} activated token{} with a legal jump.",
+                "Choose one of the {options} glowing token{} to jump with.",
                 if options == 1 { "" } else { "s" }
             )
         }
@@ -1080,8 +1147,11 @@ fn status_text(game: &Game) -> String {
 fn window_conf() -> Conf {
     Conf {
         window_title: "Hibe di Hopedi".to_owned(),
-        window_width: 1120,
-        window_height: 760,
+        // Physical window pixels; main() enlarges the window on hidpi
+        // screens so the logical workspace matches the ~1152×768 design
+        // the layout constants assume (identical to the web build).
+        window_width: 1152,
+        window_height: 768,
         window_resizable: true,
         // Size the drawing buffer in physical pixels on hidpi screens;
         // macroquad keeps screen coordinates and text layout logical, and
@@ -1092,7 +1162,7 @@ fn window_conf() -> Conf {
 }
 
 fn draw_wrapped_text(
-    text: &str,
+    body: &str,
     x: f32,
     mut y: f32,
     max_width: f32,
@@ -1101,15 +1171,15 @@ fn draw_wrapped_text(
     color: Color,
 ) {
     let mut line = String::new();
-    for word in text.split_whitespace() {
+    for word in body.split_whitespace() {
         let candidate = if line.is_empty() {
             word.to_owned()
         } else {
             format!("{line} {word}")
         };
 
-        if !line.is_empty() && measure_text(&candidate, None, size as u16, 1.0).width > max_width {
-            draw_text(&line, x, y, size, color);
+        if !line.is_empty() && text_width(&candidate, size) > max_width {
+            text(&line, x, y, size, color);
             y += line_height;
             line = word.to_owned();
         } else {
@@ -1118,7 +1188,7 @@ fn draw_wrapped_text(
     }
 
     if !line.is_empty() {
-        draw_text(&line, x, y, size, color);
+        text(&line, x, y, size, color);
     }
 }
 
@@ -1137,11 +1207,4 @@ fn point_in_rect(point: Vec2, rect: Rect) -> bool {
         && point.x <= rect.x + rect.w
         && point.y >= rect.y
         && point.y <= rect.y + rect.h
-}
-
-fn side_color(side: Side) -> Color {
-    match side {
-        Side::Red => RED_CELL,
-        Side::Green => GREEN_CELL,
-    }
 }

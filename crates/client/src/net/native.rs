@@ -93,29 +93,23 @@ fn pump(
         match socket.read() {
             Ok(tungstenite::Message::Text(text)) => {
                 match serde_json::from_str::<ServerMessage>(text.as_str()) {
-                    Ok(message) => {
-                        #[cfg(debug_assertions)]
-                        eprintln!("relay in: {message:?}");
-                        match message {
-                            ServerMessage::Hello { side } => {
-                                let _ = event_tx.send(NetEvent::Connected { side });
-                            }
-                            ServerMessage::PeerJoined => {
-                                let _ = event_tx.send(NetEvent::PeerJoined { peer: None });
-                            }
-                            ServerMessage::PeerLeft => {
-                                let _ = event_tx.send(NetEvent::PeerLeft { peer: None });
-                            }
-                            ServerMessage::Sync(sync) => {
-                                let _ = event_tx.send(NetEvent::Sync(sync));
-                            }
-                            ServerMessage::Full => {
-                                let _ = event_tx.send(NetEvent::Closed {
-                                    reason: "the relay server is full".to_owned(),
-                                });
-                                return Flow::Stop;
-                            }
-                        }
+                    Ok(ServerMessage::Hello { side }) => {
+                        let _ = event_tx.send(NetEvent::Connected { side });
+                    }
+                    Ok(ServerMessage::PeerJoined) => {
+                        let _ = event_tx.send(NetEvent::PeerJoined { peer: None });
+                    }
+                    Ok(ServerMessage::PeerLeft) => {
+                        let _ = event_tx.send(NetEvent::PeerLeft { peer: None });
+                    }
+                    Ok(ServerMessage::Sync(sync)) => {
+                        let _ = event_tx.send(NetEvent::Sync(sync));
+                    }
+                    Ok(ServerMessage::Full) => {
+                        let _ = event_tx.send(NetEvent::Closed {
+                            reason: "the relay server is full".to_owned(),
+                        });
+                        return Flow::Stop;
                     }
                     Err(_) => {}
                 }

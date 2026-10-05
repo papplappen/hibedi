@@ -555,10 +555,15 @@ impl Game {
     }
 
     pub fn selectable_activated_tokens(&self) -> Vec<TokenId> {
-        if self.phase != Phase::ChooseActivatedToken {
-            return Vec::new();
+        match self.phase {
+            Phase::ChooseActivatedToken => self.movable_pending_tokens(),
+            // Before the first hop the selection is still negotiable:
+            // the other movable activated tokens glow as switch targets.
+            Phase::ChooseJump if self.crossed_this_chain.is_empty() => {
+                self.movable_pending_tokens()
+            }
+            _ => Vec::new(),
         }
-        self.movable_pending_tokens()
     }
 
     pub fn try_place_initial_token(&mut self, coord: Coord) -> bool {
@@ -643,14 +648,25 @@ impl Game {
         self.try_jump(jump.direction)
     }
 
+    /// Chooses which activated token to jump with. Beyond the
+    /// `ChooseActivatedToken` phase this also accepts a switch during
+    /// `ChooseJump` before the first hop: the selection only locks once
+    /// jumping starts. A switch returns the previously selected token to
+    /// the pending set, so the turn still asks for it afterwards.
     pub fn try_select_activated_token(&mut self, token: TokenId) -> bool {
-        if self.phase != Phase::ChooseActivatedToken
-            || !self.pending_activated.contains(&token)
+        let switching = self.phase == Phase::ChooseJump && self.crossed_this_chain.is_empty();
+        if self.phase != Phase::ChooseActivatedToken && !switching {
+            return false;
+        }
+        if !self.pending_activated.contains(&token)
             || !self.movable_pending_tokens().contains(&token)
         {
             return false;
         }
 
+        if switching && let Some(previous) = self.current_token {
+            self.pending_activated.push(previous);
+        }
         self.pending_activated.retain(|pending| *pending != token);
         self.current_token = Some(token);
         self.crossed_this_chain.clear();
@@ -785,6 +801,54 @@ mod tests {
                 .legal_jumps_for_token(token, &HashSet::new())
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn selected_token_can_be_switched_before_the_first_hop() {
+        let mut board = board_from_rows(&[".......", ".RR....", ".RR.R..", ".......", "GG....."]);
+        let first = TokenId(10);
+        let second = TokenId(11);
+        assert!(board.add_token(first, Coord::new(1, 2)));
+        assert!(board.add_token(second, Coord::new(1, 3)));
+        let mut game = Game::from_board(board, Side::Red);
+
+        // Green (fewer cells) places above the red column and jumps
+        // through it (two compulsory hops), activating both waiting
+        // tokens.
+        assert!(game.try_place_initial_token(Coord::new(2, 1)));
+        assert!(game.try_jump(Direction::Down));
+        assert!(game.try_jump(Direction::Down));
+
+        assert_eq!(game.phase(), Phase::ChooseActivatedToken);
+        let selectable = game.selectable_activated_tokens();
+        assert_eq!(selectable.len(), 2);
+        assert!(selectable.contains(&first));
+        assert!(selectable.contains(&second));
+
+        // Selecting one does not lock the choice in yet: the other one
+        // still glows as a switch target.
+        assert!(game.try_select_activated_token(first));
+        assert_eq!(game.current_token(), Some(first));
+        assert_eq!(game.phase(), Phase::ChooseJump);
+        assert!(game.selectable_activated_tokens().contains(&second));
+
+        assert!(game.try_select_activated_token(second));
+        assert_eq!(game.current_token(), Some(second));
+        assert!(game.pending_activated_tokens().contains(&first));
+        // The running selection is not its own switch target.
+        assert!(!game.try_select_activated_token(second));
+
+        // Once the chain has started hopping, the selection locks.
+        assert!(game.try_jump(Direction::Right));
+        assert_eq!(game.phase(), Phase::ChooseJump);
+        assert!(game.selectable_activated_tokens().is_empty());
+        assert!(!game.try_select_activated_token(first));
+
+        // The chain runs out of jumps after the second hop, and the
+        // remaining activated token is asked for as usual.
+        assert!(game.try_jump(Direction::Right));
+        assert_eq!(game.phase(), Phase::ChooseActivatedToken);
+        assert!(game.try_select_activated_token(first));
     }
 
     #[test]

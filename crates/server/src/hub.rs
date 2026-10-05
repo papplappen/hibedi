@@ -40,8 +40,13 @@ pub async fn run(mut commands: mpsc::UnboundedReceiver<Command>) {
                     let side = if index == 0 { Side::Red } else { Side::Green };
                     seats[index] = Some((conn, tx.clone()));
                     let _ = tx.send(ServerMessage::Hello { side });
+                    // Both seats learn the room filled: the incumbent so it
+                    // can present the game, the newcomer so it knows its
+                    // opponent is there (Trystero rooms do this via peer
+                    // join events on both sides; the relay must say it).
                     if let Some((_, other)) = &seats[1 - index] {
                         let _ = other.send(ServerMessage::PeerJoined);
+                        let _ = tx.send(ServerMessage::PeerJoined);
                     }
                     let _ = reply.send(Claimed::Seated { conn });
                 }
