@@ -1,8 +1,16 @@
+pub mod protocol;
+
 use std::collections::HashSet;
 
-use macroquad::rand;
+pub use protocol::{ClientMessage, ServerMessage, Status};
+use rand::{Rng, RngExt};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+/// Default playable board size shared by client and server.
+pub const BOARD_WIDTH: usize = 4;
+pub const BOARD_HEIGHT: usize = 5;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Side {
     Red,
     Green,
@@ -24,7 +32,8 @@ impl Side {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Cell {
     Empty,
     Red,
@@ -49,7 +58,7 @@ impl Cell {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Coord {
     pub x: i32,
     pub y: i32,
@@ -66,7 +75,8 @@ impl Coord {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Direction {
     Up,
     Right,
@@ -87,23 +97,23 @@ impl Direction {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TokenId(pub u32);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Token {
     pub id: TokenId,
     pub position: Coord,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Jump {
     pub direction: Direction,
     pub crossed: Vec<Coord>,
     pub landing: Coord,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Board {
     width: usize,
     height: usize,
@@ -112,7 +122,7 @@ pub struct Board {
 }
 
 impl Board {
-    pub fn random(width: usize, height: usize) -> Self {
+    pub fn random(width: usize, height: usize, rng: &mut impl Rng) -> Self {
         assert!(
             width.saturating_mul(height) >= 2,
             "the board needs at least two playable cells"
@@ -123,7 +133,7 @@ impl Board {
 
             for y in 1..=height {
                 for x in 1..=width {
-                    let cell = match rand::gen_range(0, 4) {
+                    let cell = match rng.random_range(0..4) {
                         0 | 1 => Cell::Empty,
                         2 => Cell::Red,
                         _ => Cell::Green,
@@ -149,6 +159,30 @@ impl Board {
             cells: vec![Cell::Empty; storage_width * storage_height],
             tokens: Vec::new(),
         }
+    }
+
+    /// Builds a board from row strings using `.` for empty, `R` for red and
+    /// `G` for green. The outer ring is left empty. Intended for tests and
+    /// scenario setup.
+    pub fn from_rows(rows: &[&str]) -> Self {
+        let height = rows.len();
+        let width = rows.first().map_or(0, |row| row.len());
+        let mut board = Self::empty(width, height);
+
+        for (y, row) in rows.iter().enumerate() {
+            assert_eq!(row.len(), width, "all board rows must have equal length");
+            for (x, character) in row.chars().enumerate() {
+                let cell = match character {
+                    '.' => Cell::Empty,
+                    'R' => Cell::Red,
+                    'G' => Cell::Green,
+                    other => panic!("unexpected board character: {other}"),
+                };
+                board.set_cell(Coord::new((x + 1) as i32, (y + 1) as i32), cell);
+            }
+        }
+
+        board
     }
 
     pub const fn storage_width(&self) -> usize {
@@ -333,7 +367,9 @@ impl Board {
             && !self.is_occupied(coord)
     }
 
-    fn add_token(&mut self, id: TokenId, position: Coord) -> bool {
+    /// Adds a token when the cell can host one. Intended for tests and
+    /// scenario setup; gameplay uses `Game::try_place_initial_token`.
+    pub fn add_token(&mut self, id: TokenId, position: Coord) -> bool {
         if !self.can_host_token(position) {
             return false;
         }
@@ -388,7 +424,8 @@ impl Board {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Phase {
     PlaceInitialToken,
     ChooseJump,
@@ -396,19 +433,21 @@ pub enum Phase {
     GameOver,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WinReason {
     Monochrome,
     Majority,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum GameResult {
     Winner { side: Side, reason: WinReason },
     Draw,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Game {
     board: Board,
     current_player: Side,
@@ -423,9 +462,9 @@ pub struct Game {
 }
 
 impl Game {
-    pub fn new_random(width: usize, height: usize) -> Self {
-        let board = Board::random(width, height);
-        let tie_breaker = if rand::gen_range(0, 2) == 0 {
+    pub fn new_random(width: usize, height: usize, rng: &mut impl Rng) -> Self {
+        let board = Board::random(width, height, rng);
+        let tie_breaker = if rng.random_range(0..2) == 0 {
             Side::Red
         } else {
             Side::Green
@@ -433,7 +472,9 @@ impl Game {
         Self::from_board(board, tie_breaker)
     }
 
-    fn from_board(board: Board, tie_breaker: Side) -> Self {
+    /// Starts a game from a prepared board. The first player is the side
+    /// with fewer colored cells; `tie_breaker` decides equal counts.
+    pub fn from_board(board: Board, tie_breaker: Side) -> Self {
         let (red, green) = board.colored_counts();
         let current_player = match red.cmp(&green) {
             std::cmp::Ordering::Less => Side::Red,
@@ -671,24 +712,7 @@ mod tests {
     use super::*;
 
     fn board_from_rows(rows: &[&str]) -> Board {
-        let height = rows.len();
-        let width = rows.first().map_or(0, |row| row.len());
-        let mut board = Board::empty(width, height);
-
-        for (y, row) in rows.iter().enumerate() {
-            assert_eq!(row.len(), width);
-            for (x, character) in row.chars().enumerate() {
-                let cell = match character {
-                    '.' => Cell::Empty,
-                    'R' => Cell::Red,
-                    'G' => Cell::Green,
-                    _ => panic!("unexpected board character"),
-                };
-                board.set_cell(Coord::new((x + 1) as i32, (y + 1) as i32), cell);
-            }
-        }
-
-        board
+        Board::from_rows(rows)
     }
 
     #[test]

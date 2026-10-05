@@ -1,0 +1,11 @@
+[package]
+name = "hibedi-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hibedi-core.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+macroquad = "0.4"
+tungstenite = "0.30"
