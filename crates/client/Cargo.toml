@@ -12,3 +12,8 @@ macroquad = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tungstenite = "0.30"
+
+# For the getrandom custom-backend hook (see net/wasm.rs); on wasm the
+# entropy comes through the JS bridge, not wasm-bindgen.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", default-features = false }

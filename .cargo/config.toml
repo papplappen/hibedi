@@ -1,9 +1,12 @@
-# getrandom (via rand) picks its entropy source per target; on wasm the
-# backend is the browser's crypto.getRandomValues, selected by this cfg.
+# getrandom (via rand) picks its entropy source per target. On wasm the
+# "custom" backend is used: the client defines __getrandom_v03_custom,
+# which calls into net.js (crypto.getRandomValues). This avoids pulling
+# wasm-bindgen into the build, which the macroquad/gl.js loader cannot
+# provide imports for.
 [target.wasm32-unknown-unknown]
 rustflags = [
     "--cfg",
-    'getrandom_backend="wasm_js"',
+    'getrandom_backend="custom"',
     "-C",
     "link-arg=--allow-undefined",
 ]

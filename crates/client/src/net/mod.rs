@@ -15,12 +15,12 @@ mod host;
 
 use serde::{Deserialize, Serialize};
 
-use hibedi_core::{ClientMessage, ServerMessage};
+use hibedi_core::ServerMessage;
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
 // Each target never constructs the other's variants: native never emits
-// Closed/Booted/Room/Copied, wasm never emits Disconnected.
+// Closed/Lobby/LocalGame, wasm never emits Disconnected.
 #[allow(dead_code)]
 pub enum NetEvent {
     Connected,
@@ -30,47 +30,61 @@ pub enum NetEvent {
     /// reconnected to automatically, so the session is over.
     Closed { reason: String },
     Message(ServerMessage),
-    /// The bridge is up; `room` is a room code carried by the page URL.
-    Booted { room: Option<String> },
-    /// A hosted room exists and is waiting for the opponent.
-    Room { code: String, share_url: String },
-    /// The bridge copied text to the clipboard.
-    Copied,
+    /// The bridge returned to the lobby (wasm): drop any session state.
+    #[cfg(target_arch = "wasm32")]
+    Lobby,
+    /// The bridge asked for a local hotseat game (wasm).
+    #[cfg(target_arch = "wasm32")]
+    LocalGame,
 }
 
-/// JSON envelope for commands from Rust into the JS bridge (web/net.js).
-/// The full wire format is declared on every target even though some
-/// variants are only ever constructed on one of them.
+/// JSON envelope for commands from Rust into the JS bridge (web/game.js).
+/// Game-agnostic: payloads are opaque JSON values the bridge only routes.
+/// Declared on every target even though only wasm constructs them.
 #[derive(Debug, Serialize)]
-#[allow(dead_code, clippy::large_enum_variant)]
+#[allow(dead_code)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum BridgeCommand {
-    Host,
-    Join { code: String },
-    Client { message: ClientMessage },
-    Server {
-        message: ServerMessage,
-        /// Target peer for directed sends; `None` broadcasts to the room.
+    /// The game view is live; the bridge hides its lobby overlay.
+    Ready,
+    /// Hands `data` to the room; `peer` targets one peer, `None`
+    /// broadcasts. Routing (guest→host, host→guest) is the bridge's job.
+    Send {
+        data: serde_json::Value,
         peer: Option<String>,
     },
-    Copy { text: String },
-    Leave,
 }
 
-/// JSON envelope for events from the JS bridge into Rust. Same deal as
-/// [`BridgeCommand`]: declared everywhere, driven only on wasm.
+/// How the lobby set us up. Reported with [`BridgeEvent::Start`].
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StartRole {
+    /// The lobby opened a room; this client runs the authoritative session.
+    Host,
+    /// The lobby joined a room; the host runs the session.
+    Guest,
+    /// No room: a local hotseat game.
+    Local,
+}
+
+/// JSON envelope for events from the JS bridge into Rust. The bridge owns
+/// the lobby (host / join / local choice and the room itself); these
+/// events hand over the connection and report its traffic. `data` is an
+/// opaque JSON value; its interpretation depends on the role. Declared on
+/// every target, driven only on wasm.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code, clippy::large_enum_variant)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum BridgeEvent {
-    Booted { room: Option<String> },
-    Room { code: String, share_url: String },
-    Joined,
+    /// The lobby decided how to run; the connection is live.
+    Start { role: StartRole },
+    /// The lobby returned to its menu; drop any room state.
+    Leave,
     PeerJoined { peer: String },
     PeerLeft { peer: String },
-    Client { peer: String, message: ClientMessage },
-    Server { message: ServerMessage },
-    Copied,
+    /// A message from the room: guest→host traffic carries client
+    /// messages, host→guest traffic carries server messages.
+    Message { peer: String, data: serde_json::Value },
 }
 
 #[cfg(not(target_arch = "wasm32"))]

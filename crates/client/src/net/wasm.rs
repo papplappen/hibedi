@@ -8,17 +8,30 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use hibedi_core::ClientMessage;
+use hibedi_core::{ClientMessage, ServerMessage};
 
-use super::host::HostGame;
-use super::{BridgeCommand, BridgeEvent, NetEvent};
+use super::host::{Directed, HostGame};
+use super::{BridgeCommand, BridgeEvent, NetEvent, StartRole};
 
 unsafe extern "C" {
-    /// Called once at startup; the bridge answers with a `booted` event.
+    /// Called once at startup; the bridge may then push events (and
+    /// auto-joins a room when the page URL carries one).
     fn hibedi_ready();
     /// Hands an encoded [`BridgeCommand`] to the bridge. The bytes are
     /// only valid for the duration of the call.
     fn hibedi_out(ptr: *const u8, len: u32);
+    /// Fills `ptr[0..len]` with random bytes (crypto.getRandomValues on
+    /// the JS side); backs getrandom's custom wasm backend.
+    fn hibedi_random(ptr: *mut u8, len: u32);
+}
+
+/// getrandom's custom wasm backend hook: routes entropy requests through
+/// the JS bridge. This keeps `rand` fully functional on wasm without
+/// pulling in wasm-bindgen (which the macroquad loader cannot provide).
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(), getrandom::Error> {
+    unsafe { hibedi_random(dest, len as u32) };
+    Ok(())
 }
 
 /// Signals the bridge that the wasm module is ready to receive events.
@@ -44,59 +57,38 @@ impl NetHandle {
                     let mut out = Vec::new();
                     let events = host.local_message(message, &mut out);
                     net.events.extend(events);
-                    net.outbound.extend(out);
+                    queue_directed(&mut net.outbound, out);
                 }
-                Role::Guest => net.outbound.push_back(BridgeCommand::Client { message }),
+                Role::Guest => net.outbound.push_back(BridgeCommand::Send {
+                    data: serde_json::to_value(&message).expect("client messages always serialize"),
+                    peer: None,
+                }),
                 Role::Idle => {}
             }
         }
         flush();
     }
 
-    /// Creates a room; the bridge answers with a `room` event.
-    pub fn host_room(&self) {
+    /// Tells the bridge the game view is live, so it hides its lobby
+    /// overlay and hands the screen to the canvas.
+    pub fn notify_ready(&self) {
         {
-            let mut net = state();
-            net.awaiting_room = true;
-            net.outbound.push_back(BridgeCommand::Host);
-        }
-        flush();
-    }
-
-    /// Joins an existing room as the guest.
-    pub fn join_room(&self, code: String) {
-        {
-            let mut net = state();
-            net.role = Role::Guest;
-            net.outbound.push_back(BridgeCommand::Join { code });
-        }
-        flush();
-    }
-
-    pub fn copy(&self, text: String) {
-        {
-            let mut net = state();
-            net.outbound.push_back(BridgeCommand::Copy { text });
-        }
-        flush();
-    }
-
-    /// Leaves the room (if any) and returns to the idle state.
-    pub fn leave(&self) {
-        {
-            let mut net = state();
-            net.role = Role::Idle;
-            net.awaiting_room = false;
-            net.events.clear();
-            net.outbound.clear();
-            net.outbound.push_back(BridgeCommand::Leave);
+            state().outbound.push_back(BridgeCommand::Ready);
         }
         flush();
     }
 }
 
+/// Queues directed session messages as generic `send` commands.
+fn queue_directed(outbound: &mut VecDeque<BridgeCommand>, messages: Vec<Directed>) {
+    outbound.extend(messages.into_iter().map(|(peer, message)| BridgeCommand::Send {
+        data: serde_json::to_value(&message).expect("server messages always serialize"),
+        peer,
+    }));
+}
+
 enum Role {
-    /// No room: the menu decides what to do.
+    /// In the lobby: the HTML overlay decides what to do next.
     Idle,
     /// Joined an existing room as the guest; the host runs the session.
     Guest,
@@ -106,9 +98,6 @@ enum Role {
 
 struct WasmNet {
     role: Role,
-    /// Set while waiting for the bridge to confirm a hosted room, so a
-    /// stale `room` event cannot hijack the state.
-    awaiting_room: bool,
     events: VecDeque<NetEvent>,
     outbound: VecDeque<BridgeCommand>,
 }
@@ -117,7 +106,6 @@ impl WasmNet {
     const fn new() -> Self {
         Self {
             role: Role::Idle,
-            awaiting_room: false,
             events: VecDeque::new(),
             outbound: VecDeque::new(),
         }
@@ -172,23 +160,26 @@ pub extern "C" fn hibedi_on_event(ptr: *const u8, len: u32) {
     {
         let mut net = state();
         match event {
-            BridgeEvent::Booted { room } => {
-                net.events.push_back(NetEvent::Booted { room });
-            }
-            BridgeEvent::Copied => net.events.push_back(NetEvent::Copied),
-            BridgeEvent::Room { code, share_url } => {
-                if net.awaiting_room && matches!(net.role, Role::Idle) {
-                    net.awaiting_room = false;
+            BridgeEvent::Start { role } => match role {
+                StartRole::Local => net.events.push_back(NetEvent::LocalGame),
+                StartRole::Host if matches!(net.role, Role::Idle) => {
+                    // The lobby opened a room: run the authoritative session.
+                    // Connected goes first so the lobby hands over before
+                    // the initial state events arrive.
                     let (host, events) = HostGame::new(&mut outbound);
-                    net.events.push_back(NetEvent::Room { code, share_url });
+                    net.events.push_back(NetEvent::Connected);
                     net.events.extend(events);
                     net.role = Role::Host(Box::new(host));
                 }
-            }
-            BridgeEvent::Joined => {
-                if matches!(net.role, Role::Guest) {
+                StartRole::Guest if matches!(net.role, Role::Idle) => {
+                    net.role = Role::Guest;
                     net.events.push_back(NetEvent::Connected);
                 }
+                StartRole::Host | StartRole::Guest => {}
+            },
+            BridgeEvent::Leave => {
+                net.role = Role::Idle;
+                net.events.push_back(NetEvent::Lobby);
             }
             BridgeEvent::PeerJoined { peer } => {
                 let events = if let Role::Host(host) = &mut net.role {
@@ -208,22 +199,30 @@ pub extern "C" fn hibedi_on_event(ptr: *const u8, len: u32) {
                 };
                 net.events.extend(events);
             }
-            BridgeEvent::Client { peer, message } => {
-                let events = if let Role::Host(host) = &mut net.role {
-                    host.client_message(&peer, message, &mut outbound)
-                } else {
-                    Vec::new()
-                };
-                net.events.extend(events);
-            }
-            BridgeEvent::Server { message } => {
-                if matches!(net.role, Role::Guest) {
-                    net.events.push_back(NetEvent::Message(message));
+            BridgeEvent::Message { peer, data } => match &mut net.role {
+                Role::Host(host) => {
+                    // Guest→host traffic: client messages.
+                    match serde_json::from_value::<ClientMessage>(data) {
+                        Ok(message) => {
+                            let events = host.client_message(&peer, message, &mut outbound);
+                            net.events.extend(events);
+                        }
+                        Err(error) => eprintln!("ignoring malformed client message: {error}"),
+                    }
                 }
-            }
+                Role::Guest => {
+                    // Host→guest traffic: server messages.
+                    match serde_json::from_value::<ServerMessage>(data) {
+                        Ok(message) => net.events.push_back(NetEvent::Message(message)),
+                        Err(error) => eprintln!("ignoring malformed server message: {error}"),
+                    }
+                }
+                Role::Idle => {}
+            },
         }
     }
     if !outbound.is_empty() {
-        state().outbound.extend(outbound);
+        let mut net = state();
+        queue_directed(&mut net.outbound, outbound);
     }
 }

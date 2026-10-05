@@ -1,17 +1,21 @@
 //! Host-side glue for hosted rooms: runs the authoritative [`Session`]
 //! inside the hosting browser and routes messages between the local
-//! player and the remote guest over the JS bridge. Pure logic, so it is
-//! unit-tested on native targets too.
+//! player and the remote guest. Pure logic — it knows nothing about the
+//! transport — so it is unit-tested on native targets too.
 
 use std::collections::{HashMap, HashSet};
 
 use hibedi_core::session::{ClaimOutcome, ConnId, Session};
 use hibedi_core::{ClientMessage, ServerMessage, Side};
 
-use super::{BridgeCommand, NetEvent};
+use super::NetEvent;
 
 /// Connection id of the local (hosting) player; guests count up from here.
 const LOCAL_CONN: ConnId = 0;
+
+/// A session message aimed into the room: `None` broadcasts, `Some(peer)`
+/// targets one peer. The transport decides how to route it.
+pub type Directed = (Option<String>, ServerMessage);
 
 struct PeerSeat {
     conn: ConnId,
@@ -31,7 +35,7 @@ pub struct HostGame {
 
 impl HostGame {
     /// Claims the local seat and delivers the initial waiting state.
-    pub fn new(out: &mut Vec<BridgeCommand>) -> (Self, Vec<NetEvent>) {
+    pub fn new(out: &mut Vec<Directed>) -> (Self, Vec<NetEvent>) {
         let mut session = Session::new();
         let (local_side, messages) = match session.claim(LOCAL_CONN) {
             ClaimOutcome::Seated { side, messages } => (side, messages),
@@ -51,14 +55,14 @@ impl HostGame {
     pub fn local_message(
         &mut self,
         message: ClientMessage,
-        out: &mut Vec<BridgeCommand>,
+        out: &mut Vec<Directed>,
     ) -> Vec<NetEvent> {
         let messages = self.session.handle_message(self.local_side, message);
         self.deliver(messages, out)
     }
 
     /// Seats a joining peer, or tells it the room is full.
-    pub fn peer_joined(&mut self, peer: &str, out: &mut Vec<BridgeCommand>) -> Vec<NetEvent> {
+    pub fn peer_joined(&mut self, peer: &str, out: &mut Vec<Directed>) -> Vec<NetEvent> {
         if self.rejected.contains(peer) || self.peers.contains_key(peer) {
             return Vec::new();
         }
@@ -72,18 +76,18 @@ impl HostGame {
             }
             ClaimOutcome::Full => {
                 self.rejected.insert(peer.to_owned());
-                out.push(BridgeCommand::Server {
-                    message: ServerMessage::Error {
+                out.push((
+                    Some(peer.to_owned()),
+                    ServerMessage::Error {
                         reason: "the room is full".to_owned(),
                     },
-                    peer: Some(peer.to_owned()),
-                });
+                ));
                 Vec::new()
             }
         }
     }
 
-    pub fn peer_left(&mut self, peer: &str, out: &mut Vec<BridgeCommand>) -> Vec<NetEvent> {
+    pub fn peer_left(&mut self, peer: &str, out: &mut Vec<Directed>) -> Vec<NetEvent> {
         let Some(seat) = self.peers.remove(peer) else {
             self.rejected.remove(peer);
             return Vec::new();
@@ -96,7 +100,7 @@ impl HostGame {
         &mut self,
         peer: &str,
         message: ClientMessage,
-        out: &mut Vec<BridgeCommand>,
+        out: &mut Vec<Directed>,
     ) -> Vec<NetEvent> {
         let Some(seat) = self.peers.get(peer) else {
             return Vec::new();
@@ -119,17 +123,14 @@ impl HostGame {
     fn deliver(
         &self,
         messages: Vec<(Side, ServerMessage)>,
-        out: &mut Vec<BridgeCommand>,
+        out: &mut Vec<Directed>,
     ) -> Vec<NetEvent> {
         let mut events = Vec::new();
         for (side, message) in messages {
             if side == self.local_side {
                 events.push(NetEvent::Message(message));
             } else {
-                out.push(BridgeCommand::Server {
-                    message,
-                    peer: self.peer_of(side).map(str::to_owned),
-                });
+                out.push((self.peer_of(side).map(str::to_owned), message));
             }
         }
         events
@@ -147,17 +148,14 @@ mod tests {
         hibedi_core::Game::from_board(Board::from_rows(&["R.G"]), Side::Red)
     }
 
-    fn new_host(out: &mut Vec<BridgeCommand>) -> HostGame {
+    fn new_host(out: &mut Vec<Directed>) -> HostGame {
         let (host, _) = HostGame::new(out);
         host
     }
 
-    fn server_messages(out: &[BridgeCommand]) -> Vec<(&ServerMessage, Option<&str>)> {
+    fn server_messages(out: &[Directed]) -> Vec<(&ServerMessage, Option<&str>)> {
         out.iter()
-            .filter_map(|command| match command {
-                BridgeCommand::Server { message, peer } => Some((message, peer.as_deref())),
-                _ => None,
-            })
+            .map(|(peer, message)| (message, peer.as_deref()))
             .collect()
     }
 

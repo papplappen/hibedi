@@ -7,11 +7,13 @@ edition.workspace = true
 serde.workspace = true
 rand.workspace = true
 
-# `rand` routes its entropy through getrandom, which needs the browser's
-# crypto.getRandomValues backend on wasm (see .cargo/config.toml for the
-# matching `getrandom_backend` cfg).
+# `rand` routes its entropy through getrandom; on wasm the getrandom
+# "custom" backend is selected via .cargo/config.toml, and the client
+# provides the __getrandom_v03_custom implementation (see
+# crates/client/src/net/wasm.rs). Nothing needs to enable the
+# wasm-bindgen-based `wasm_js` feature.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 serde_json.workspace = true

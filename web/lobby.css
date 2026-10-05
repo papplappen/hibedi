@@ -1,0 +1,173 @@
+/* Shared base + lobby styles for wasm games. The palette matches the
+   in-canvas game (dark slate, gold accent). */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #11151e;
+}
+
+/* gl.js sizes the drawing buffer from the canvas CSS size. 100dvh
+   matches the visible viewport on iOS Safari, where 100vh extends
+   under the URL bar. */
+#glcanvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+}
+
+.lobby {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #11151e;
+  color: #e8e6df;
+  font: 15px/1.5 system-ui, sans-serif;
+}
+
+.lobby.hidden {
+  display: none;
+}
+
+.lobby-card {
+  width: min(340px, calc(100vw - 48px));
+  display: grid;
+  gap: 10px;
+}
+
+.lobby h1 {
+  margin: 0 0 4px;
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.lobby .tagline {
+  margin: 0 0 16px;
+  text-align: center;
+  color: #a9b2bf;
+  font-size: 14px;
+}
+
+.lobby h2 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.lobby section {
+  display: grid;
+  gap: 10px;
+}
+
+.lobby section[hidden] {
+  display: none;
+}
+
+.lobby button {
+  width: 100%;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #e8e6df;
+  background: #2a3242;
+  cursor: pointer;
+  /* No double-tap-zoom delay between rapid taps on mobile. */
+  touch-action: manipulation;
+}
+
+.lobby button:hover {
+  filter: brightness(1.15);
+}
+
+.lobby button.primary {
+  background: #c28926;
+}
+
+.lobby input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid #434d60;
+  border-radius: 8px;
+  background: #1f2633;
+  color: #e8e6df;
+  font: inherit;
+  font-size: 22px;
+  letter-spacing: 0.3em;
+  text-align: center;
+  text-transform: uppercase;
+  outline: none;
+}
+
+.lobby input:focus {
+  border-color: #c28926;
+}
+
+.lobby .row {
+  display: flex;
+  gap: 10px;
+}
+
+.lobby .hint {
+  margin: -4px 0 6px;
+  text-align: center;
+  color: #a9b2bf;
+  font-size: 13px;
+}
+
+.lobby .footer {
+  margin: 16px 0 0;
+  text-align: center;
+  color: #a9b2bf;
+  font-size: 13px;
+}
+
+.lobby .notice {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border: 1px solid #434d60;
+  border-radius: 8px;
+  background: #1f2633;
+  color: #e0b45c;
+  text-align: center;
+  font-size: 14px;
+}
+
+.lobby .code {
+  margin: 4px 0;
+  text-align: center;
+  font-family: ui-monospace, monospace;
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: 0.25em;
+  color: #c28926;
+}
+
+.lobby .share-link {
+  text-align: center;
+  color: #8ab6c9;
+  font-size: 13px;
+  word-break: break-all;
+  text-decoration: none;
+}
+
+.lobby .share-link:hover {
+  text-decoration: underline;
+}
