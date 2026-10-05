@@ -148,11 +148,6 @@ mod tests {
         hibedi_core::Game::from_board(Board::from_rows(&["R.G"]), Side::Red)
     }
 
-    fn new_host(out: &mut Vec<Directed>) -> HostGame {
-        let (host, _) = HostGame::new(out);
-        host
-    }
-
     fn server_messages(out: &[Directed]) -> Vec<(&ServerMessage, Option<&str>)> {
         out.iter()
             .map(|(peer, message)| (message, peer.as_deref()))

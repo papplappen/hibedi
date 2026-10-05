@@ -8,7 +8,11 @@ hibedi-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rand.workspace = true
-macroquad = "0.4"
+# Pinned to a master revision: 0.4.16 (newest release) still has the
+# nondeterministic font-atlas growth that deletes its GL texture mid-frame
+# and corrupts or blurs text (macroquad #1006, #1054). Master fixes the
+# atlas packing; switch back to crates.io once the fix is released.
+macroquad = { git = "https://github.com/not-fl3/macroquad", rev = "8d602d3f8ebb8a3a582ee15d92983bbb81ee3ef6" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tungstenite = "0.30"
