@@ -1,8 +1,7 @@
-pub mod protocol;
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
+use std::fmt;
 
-use std::collections::HashSet;
-
-pub use protocol::{Replica, ServerMessage, StateSync, Status};
 use rand::{Rng, RngExt};
 
 /// Default playable board size shared by client and server.
@@ -17,18 +16,23 @@ pub enum Side {
 }
 
 impl Side {
+    /// Every side, in seat order: online, seat 0 plays red.
+    pub const ALL: [Self; 2] = [Self::Red, Self::Green];
+
     pub const fn other(self) -> Self {
         match self {
             Self::Red => Self::Green,
             Self::Green => Self::Red,
         }
     }
+}
 
-    pub const fn label(self) -> &'static str {
-        match self {
+impl fmt::Display for Side {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
             Self::Red => "Red",
             Self::Green => "Green",
-        }
+        })
     }
 }
 
@@ -58,7 +62,9 @@ impl Cell {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Coord {
     pub x: i32,
     pub y: i32,
@@ -97,7 +103,9 @@ impl Direction {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct TokenId(pub u32);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -142,8 +150,7 @@ impl Board {
                 }
             }
 
-            let (red, green) = board.colored_counts();
-            if red > 0 && green > 0 {
+            if Side::ALL.iter().all(|&side| board.colored_count(side) > 0) {
                 return board;
             }
         }
@@ -234,66 +241,64 @@ impl Board {
         self.token_at(coord).is_some()
     }
 
-    pub fn colored_counts(&self) -> (usize, usize) {
-        let mut red = 0;
-        let mut green = 0;
+    /// Number of playable cells colored `side`.
+    pub fn colored_count(&self, side: Side) -> usize {
+        self.playable_coords()
+            .filter(|&coord| self.cells[self.index(coord)].side() == Some(side))
+            .count()
+    }
 
-        for y in 1..=self.height {
-            for x in 1..=self.width {
-                match self.cells[self.index(Coord::new(x as i32, y as i32))] {
-                    Cell::Red => red += 1,
-                    Cell::Green => green += 1,
-                    Cell::Empty => {}
-                }
-            }
+    /// The side holding more colored cells; `None` on equal counts.
+    pub fn majority(&self) -> Option<Side> {
+        match self
+            .colored_count(Side::Red)
+            .cmp(&self.colored_count(Side::Green))
+        {
+            Ordering::Greater => Some(Side::Red),
+            Ordering::Less => Some(Side::Green),
+            Ordering::Equal => None,
         }
-
-        (red, green)
     }
 
     pub fn legal_initial_placements(&self) -> Vec<Coord> {
-        let no_history = HashSet::new();
-        let mut placements = Vec::new();
-
-        for y in 0..self.storage_height() as i32 {
-            for x in 0..self.storage_width() as i32 {
-                let coord = Coord::new(x, y);
-                if !self.can_host_token(coord) {
-                    continue;
-                }
-
-                if Direction::ALL.into_iter().any(|direction| {
-                    self.legal_jump_from(coord, direction, &no_history)
-                        .is_some()
-                }) {
-                    placements.push(coord);
-                }
-            }
-        }
-
-        placements
+        self.initial_placements().collect()
     }
 
     pub fn has_initial_move(&self) -> bool {
-        let no_history = HashSet::new();
+        self.initial_placements().next().is_some()
+    }
 
-        (0..self.storage_height() as i32).any(|y| {
-            (0..self.storage_width() as i32).any(|x| {
-                let coord = Coord::new(x, y);
-                self.can_host_token(coord)
-                    && Direction::ALL.into_iter().any(|direction| {
-                        self.legal_jump_from(coord, direction, &no_history)
-                            .is_some()
-                    })
-            })
+    /// Cells a new token may be placed on: any free empty cell (outer
+    /// ring included) with a jump available from it.
+    fn initial_placements(&self) -> impl Iterator<Item = Coord> {
+        let no_history = BTreeSet::new();
+        self.storage_coords().filter(move |&coord| {
+            self.can_host_token(coord)
+                && Direction::ALL.into_iter().any(|direction| {
+                    self.legal_jump_from(coord, direction, &no_history)
+                        .is_some()
+                })
         })
+    }
+
+    /// Every cell inside the outer ring, row by row.
+    fn playable_coords(&self) -> impl Iterator<Item = Coord> {
+        self.storage_coords()
+            .filter(|&coord| self.is_playable_cell(coord))
+    }
+
+    /// Every cell of the storage grid, row by row.
+    fn storage_coords(&self) -> impl Iterator<Item = Coord> {
+        let width = self.storage_width() as i32;
+        let height = self.storage_height() as i32;
+        (0..height).flat_map(move |y| (0..width).map(move |x| Coord::new(x, y)))
     }
 
     pub fn legal_jump_from(
         &self,
         origin: Coord,
         direction: Direction,
-        crossed_this_chain: &HashSet<Coord>,
+        crossed_this_chain: &BTreeSet<Coord>,
     ) -> Option<Jump> {
         if !self.is_in_storage(origin) {
             return None;
@@ -337,7 +342,7 @@ impl Board {
     pub fn legal_jumps_for_token(
         &self,
         id: TokenId,
-        crossed_this_chain: &HashSet<Coord>,
+        crossed_this_chain: &BTreeSet<Coord>,
     ) -> Vec<Jump> {
         let Some(origin) = self.token_position(id) else {
             return Vec::new();
@@ -399,28 +404,19 @@ impl Board {
         }
     }
 
+    /// The side owning every colored cell, if one does.
     fn monochrome_side(&self) -> Option<Side> {
-        let (red, green) = self.colored_counts();
-        match (red, green) {
-            (red, 0) if red > 0 => Some(Side::Red),
-            (0, green) if green > 0 => Some(Side::Green),
-            _ => None,
-        }
+        Side::ALL
+            .into_iter()
+            .find(|&side| self.colored_count(side) > 0 && self.colored_count(side.other()) == 0)
     }
 
     fn majority_result(&self) -> GameResult {
-        let (red, green) = self.colored_counts();
-        match red.cmp(&green) {
-            std::cmp::Ordering::Greater => GameResult::Winner {
-                side: Side::Red,
+        self.majority()
+            .map_or(GameResult::Draw, |side| GameResult::Winner {
+                side,
                 reason: WinReason::Majority,
-            },
-            std::cmp::Ordering::Less => GameResult::Winner {
-                side: Side::Green,
-                reason: WinReason::Majority,
-            },
-            std::cmp::Ordering::Equal => GameResult::Draw,
-        }
+            })
     }
 }
 
@@ -453,9 +449,9 @@ pub struct Game {
     current_player: Side,
     phase: Phase,
     current_token: Option<TokenId>,
-    crossed_this_chain: HashSet<Coord>,
-    turn_start_tokens: HashSet<TokenId>,
-    activated_this_turn: HashSet<TokenId>,
+    crossed_this_chain: BTreeSet<Coord>,
+    turn_start_tokens: BTreeSet<TokenId>,
+    activated_this_turn: BTreeSet<TokenId>,
     pending_activated: Vec<TokenId>,
     next_token_id: u32,
     result: Option<GameResult>,
@@ -475,12 +471,7 @@ impl Game {
     /// Starts a game from a prepared board. The first player is the side
     /// with fewer colored cells; `tie_breaker` decides equal counts.
     pub fn from_board(board: Board, tie_breaker: Side) -> Self {
-        let (red, green) = board.colored_counts();
-        let current_player = match red.cmp(&green) {
-            std::cmp::Ordering::Less => Side::Red,
-            std::cmp::Ordering::Greater => Side::Green,
-            std::cmp::Ordering::Equal => tie_breaker,
-        };
+        let current_player = board.majority().map_or(tie_breaker, Side::other);
         let next_token_id = board
             .tokens
             .iter()
@@ -494,9 +485,9 @@ impl Game {
             current_player,
             phase: Phase::PlaceInitialToken,
             current_token: None,
-            crossed_this_chain: HashSet::new(),
-            turn_start_tokens: HashSet::new(),
-            activated_this_turn: HashSet::new(),
+            crossed_this_chain: BTreeSet::new(),
+            turn_start_tokens: BTreeSet::new(),
+            activated_this_turn: BTreeSet::new(),
             pending_activated: Vec::new(),
             next_token_id,
             result: None,
@@ -566,6 +557,7 @@ impl Game {
         }
     }
 
+    #[must_use = "the move is not made when it returns false"]
     pub fn try_place_initial_token(&mut self, coord: Coord) -> bool {
         if self.phase != Phase::PlaceInitialToken
             || !self.board.legal_initial_placements().contains(&coord)
@@ -586,6 +578,7 @@ impl Game {
         true
     }
 
+    #[must_use = "the move is not made when it returns false"]
     pub fn try_jump(&mut self, direction: Direction) -> bool {
         if self.phase != Phase::ChooseJump {
             return false;
@@ -637,6 +630,7 @@ impl Game {
     /// play and the session: a click names the cell that was clicked and
     /// is resolved against the live board, never re-interpreted from a
     /// possibly stale view.
+    #[must_use = "the move is not made when it returns false"]
     pub fn try_jump_to(&mut self, landing: Coord) -> bool {
         let Some(jump) = self
             .legal_current_jumps()
@@ -653,6 +647,7 @@ impl Game {
     /// `ChooseJump` before the first hop: the selection only locks once
     /// jumping starts. A switch returns the previously selected token to
     /// the pending set, so the turn still asks for it afterwards.
+    #[must_use = "the move is not made when it returns false"]
     pub fn try_select_activated_token(&mut self, token: TokenId) -> bool {
         let switching = self.phase == Phase::ChooseJump && self.crossed_this_chain.is_empty();
         if self.phase != Phase::ChooseActivatedToken && !switching {
@@ -706,7 +701,7 @@ impl Game {
     }
 
     fn movable_pending_tokens(&self) -> Vec<TokenId> {
-        let no_history = HashSet::new();
+        let no_history = BTreeSet::new();
         self.pending_activated
             .iter()
             .copied()
@@ -754,7 +749,7 @@ mod tests {
         assert!(board.add_token(token, Coord::new(0, 1)));
 
         let jump = board
-            .legal_jumps_for_token(token, &HashSet::new())
+            .legal_jumps_for_token(token, &BTreeSet::new())
             .into_iter()
             .find(|jump| jump.direction == Direction::Right)
             .expect("the edge run should be jumpable");
@@ -781,7 +776,7 @@ mod tests {
 
         assert!(
             board
-                .legal_jumps_for_token(TokenId(1), &HashSet::new())
+                .legal_jumps_for_token(TokenId(1), &BTreeSet::new())
                 .is_empty()
         );
     }
@@ -792,13 +787,13 @@ mod tests {
         let token = TokenId(1);
         assert!(board.add_token(token, Coord::new(0, 1)));
 
-        let mut history = HashSet::new();
+        let mut history = BTreeSet::new();
         history.insert(Coord::new(2, 1));
 
         assert!(board.legal_jumps_for_token(token, &history).is_empty());
         assert!(
             !board
-                .legal_jumps_for_token(token, &HashSet::new())
+                .legal_jumps_for_token(token, &BTreeSet::new())
                 .is_empty()
         );
     }
@@ -919,6 +914,22 @@ mod tests {
 
         assert_eq!(game.phase(), Phase::ChooseActivatedToken);
         assert_eq!(game.pending_activated_tokens(), &[outer_token]);
+    }
+
+    #[test]
+    fn games_round_trip_through_json_deterministically() {
+        // The game state is the document players share online: it must
+        // survive serialization and serialize the same way every time.
+        let mut board = board_from_rows(&["RR.R", "G..."]);
+        assert!(board.add_token(TokenId(7), Coord::new(5, 2)));
+        let mut game = Game::from_board(board, Side::Red);
+        assert!(game.try_place_initial_token(Coord::new(0, 1)));
+        assert!(game.try_jump(Direction::Right));
+
+        let json = serde_json::to_string(&game).unwrap();
+        let back: Game = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, game);
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
     }
 
     #[test]

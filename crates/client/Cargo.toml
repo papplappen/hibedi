@@ -15,9 +15,10 @@ rand.workspace = true
 macroquad = { git = "https://github.com/not-fl3/macroquad", rev = "8d602d3f8ebb8a3a582ee15d92983bbb81ee3ef6" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+hibedi-relay-protocol.workspace = true
 tungstenite = "0.30"
 
-# For the getrandom custom-backend hook (see net/wasm.rs); on wasm the
-# entropy comes through the JS bridge, not wasm-bindgen.
+# For the getrandom custom-backend hook (see src/web.rs); on wasm the
+# entropy comes from the page, not wasm-bindgen.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", default-features = false }

@@ -400,6 +400,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "hibedi-core",
+ "hibedi-relay-protocol",
  "macroquad",
  "rand 0.10.3",
  "serde",
@@ -418,13 +419,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hibedi-relay-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hibedi-server"
 version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
- "hibedi-core",
- "rand 0.10.3",
+ "hibedi-relay-protocol",
  "serde_json",
  "tokio",
 ]

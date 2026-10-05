@@ -4,9 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-hibedi-core.workspace = true
+hibedi-relay-protocol.workspace = true
 serde_json.workspace = true
-rand.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync"] }
 futures-util = "0.3"

@@ -4,13 +4,57 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hibe di Hopedi</title>
-  <link rel="stylesheet" href="./lobby.css">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./page.css">
 </head>
 <body>
-  <canvas id="glcanvas"></canvas>
-  <div id="lobby"></div>
+  <!-- The game's canvas; the miniquad loader looks it up when its script
+       runs, so it exists from the start, covered by the page until the
+       game starts. -->
+  <canvas id="glcanvas" tabindex="1"></canvas>
+
+  <main id="page">
+    <h1>Hibe di Hopedi</h1>
+    <p class="notice" data-ref="notice" role="status" hidden></p>
+
+    <div data-view="menu" hidden>
+      <section>
+        <a class="button" data-ref="create">Create a room</a>
+        <p class="hint">Starts an online game; you get a link to send to the other player.</p>
+      </section>
+
+      <form data-ref="join">
+        <div class="row">
+          <input name="room" placeholder="Room code" aria-label="Room code" maxlength="8"
+                 autocomplete="off" autocapitalize="characters" spellcheck="false">
+          <button>Join</button>
+        </div>
+        <p class="hint">Join the room of a player who gave you a code.</p>
+      </form>
+
+      <section>
+        <a class="button" href="?local">Play on this device</a>
+        <p class="hint">Two players, taking turns.</p>
+      </section>
+    </div>
+
+    <div data-view="room" hidden>
+      <h2>Room <span class="code" data-ref="code"></span></h2>
+      <p data-ref="room-status"></p>
+      <section>
+        <label for="invite-link">Invite link</label>
+        <div class="row">
+          <input id="invite-link" data-ref="link" readonly>
+          <button type="button" data-ref="copy">Copy</button>
+        </div>
+        <p class="hint">The game starts as soon as the other player opens this link.</p>
+      </section>
+      <a href="./">Leave the room</a>
+    </div>
+  </main>
+
   <script src="./mq_js_bundle.js"></script>
   <script src="./wasm-name.js"></script>
-  <script type="module" src="./game.js"></script>
+  <script type="module" src="./main.js"></script>
 </body>
 </html>

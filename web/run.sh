@@ -7,9 +7,9 @@
 #   web/run.sh --open 9000  ... on a different port
 #
 # Two-machine test: on the other machine, open the "other machine" URL
-# printed below. Host the game from THAT URL on this machine too (not
+# printed below. Create the room from THAT URL on this machine too (not
 # localhost) — the invite link is built from the page's own address, so
-# a localhost link would send the guest to their own machine.
+# a localhost link would send the other player to their own machine.
 # If the other machine cannot load the page, check this machine's
 # firewall allows inbound connections on the port.
 set -e

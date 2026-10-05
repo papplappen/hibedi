@@ -1,92 +1,65 @@
-// Hibe di Hopedi bootstrap: loads the wasm game and wires it to the
-// generic lobby. All game-specific glue lives here; lobby.js and the
-// connector are reusable for other wasm games.
+// Starts the wasm game and is the page's only contact with it. The
+// game runs the same as a local game; online it is additionally handed
+// a seat and exchanges game states with the room. The interface, as
+// JSON messages (see crates/client/src/web.rs):
+//
+//   page → game   { type: 'seat', seat }        once, before the game starts
+//                 { type: 'state', state }      a game state another player published
+//                 { type: 'presence', online }  whether every seat's player is connected
+//   game → page   a game state it published
+//
+// Transport: the miniquad loader's plugin mechanism. The game imports
+// hibedi_send (JSON out) and hibedi_random (entropy, for getrandom); the
+// page delivers JSON through the exports hibedi_alloc + hibedi_receive.
+// Messages sent before the module is instantiated are queued and
+// delivered in the loader's on_init, before the game's main runs.
 
-import { createLobby } from './lobby.js'
-import { trysteroConnector } from './connector-trystero.js'
+/// `session` is null for a local game, or `{ seat, room }` online.
+export function startGame(session) {
+  const queued = []
+  let exports = null
+  let onState = () => {}
 
-const APP_ID = 'com.github.gobusmax.hibedihopedi'
-
-// --- wasm bridge ---
-// The game consumes two entry points (see net/wasm.rs): hibedi_out
-// delivers commands, hibedi_random provides entropy; it signals readiness
-// by calling hibedi_ready and receives events via hibedi_alloc +
-// hibedi_on_event. Events queue here until the module is up.
-
-let wasmExports = null
-let connection = null
-const pending = []
-
-function push(event) {
-  if (!wasmExports) {
-    pending.push(event)
-    return
+  function send(message) {
+    if (!exports) {
+      queued.push(message)
+      return
+    }
+    const bytes = new TextEncoder().encode(JSON.stringify(message))
+    const pointer = exports.hibedi_alloc(bytes.length)
+    new Uint8Array(wasm_memory.buffer).set(bytes, pointer)
+    exports.hibedi_receive(bytes.length)
   }
-  const bytes = new TextEncoder().encode(JSON.stringify(event))
-  const pointer = wasmExports.hibedi_alloc(bytes.length)
-  new Uint8Array(wasm_memory.buffer).set(bytes, pointer)
-  wasmExports.hibedi_on_event(pointer, bytes.length)
-}
 
-window.register_plugin = (importObject) => {
-  importObject.env.hibedi_out = (pointer, length) => {
-    const bytes = new Uint8Array(wasm_memory.buffer).subarray(pointer, pointer + length)
-    handleCommand(JSON.parse(new TextDecoder().decode(bytes)))
+  miniquad_add_plugin({
+    name: 'hibedi',
+    version: 1,
+    register_plugin(importObject) {
+      importObject.env.hibedi_send = (pointer, length) => {
+        const bytes = new Uint8Array(wasm_memory.buffer, pointer, length)
+        onState(JSON.parse(new TextDecoder().decode(bytes)))
+      }
+      importObject.env.hibedi_random = (pointer, length) => {
+        crypto.getRandomValues(new Uint8Array(wasm_memory.buffer, pointer, length))
+      }
+    },
+    on_init() {
+      exports = wasm_exports
+      for (const message of queued.splice(0)) send(message)
+    },
+  })
+
+  if (session) {
+    const { seat, room } = session
+    send({ type: 'seat', seat })
+    room.onDoc((state) => send({ type: 'state', state }))
+    room.onStatus(({ ready }) => send({ type: 'presence', online: ready }))
+    onState = (state) => room.publish(state)
   }
-  importObject.env.hibedi_ready = () => {
-    wasmExports = wasm_exports
-    for (const event of pending.splice(0)) push(event)
-  }
-  importObject.env.hibedi_random = (pointer, length) => {
-    crypto.getRandomValues(new Uint8Array(wasm_memory.buffer, pointer, length))
-  }
-}
 
-window.miniquad_add_plugin({
-  name: 'hibedi',
-  version: 1,
-  register_plugin: window.register_plugin,
-})
-
-// The wasm filename is content-hashed by web/build.sh and published in
-// wasm-name.js, so browsers can cache the blob aggressively: a rebuild
-// changes the URL, an unchanged build is served from cache.
-// Logging both the hash and the device pixel ratio makes render-quality
-// mismatches between two tabs diagnosable at a glance (different hash =
-// stale tab; different ratio = per-tab zoom).
-console.log(`hibedi: ${window.WASM_PATH} (devicePixelRatio ${window.devicePixelRatio})`)
-window.load(window.WASM_PATH)
-
-// --- lobby wiring ---
-// Bridge events: start {role}, leave, peer_joined, peer_left, message.
-// Bridge commands: ready, send {data, peer}.
-
-const lobby = createLobby({
-  root: document.getElementById('lobby'),
-  title: 'Hibe di Hopedi',
-  tagline: 'A forced-hop territory prototype',
-  connector: trysteroConnector({ appId: APP_ID }),
-  onStart(role, roomConnection) {
-    connection = roomConnection
-    connection.onMessage((peer, data) => push({ type: 'message', peer, data }))
-    connection.onPeerJoin((peer) => push({ type: 'peer_joined', peer }))
-    connection.onPeerLeave((peer) => push({ type: 'peer_left', peer }))
-    push({ type: 'start', role })
-  },
-  onLeave() {
-    push({ type: 'leave' })
-  },
-  onLocal() {
-    push({ type: 'start', role: 'local' })
-  },
-})
-
-function handleCommand(command) {
-  if (command.type === 'ready') {
-    lobby.hide()
-  } else if (command.type === 'leave') {
-    lobby.leave('you left the game')
-  } else if (command.type === 'send') {
-    connection?.send(command.data, command.peer ?? undefined)
-  }
+  // Hash and pixel ratio make render differences between tabs
+  // diagnosable (different hash: stale tab; different ratio: zoom).
+  console.log(`hibedi: ${window.WASM_PATH} (devicePixelRatio ${window.devicePixelRatio})`)
+  window.load(window.WASM_PATH)
+  document.getElementById('glcanvas').focus()
 }

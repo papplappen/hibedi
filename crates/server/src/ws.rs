@@ -1,3 +1,6 @@
+//! WebSocket front of the relay: one task per connection, translating
+//! between the wire protocol and the room's commands.
+
 use axum::{
     Router,
     extract::{
@@ -8,10 +11,10 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
-use hibedi_core::{ServerMessage, StateSync};
+use hibedi_relay_protocol::{ClientMessage, ServerMessage};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::hub::{Claimed, Command, ConnId};
+use crate::hub::Command;
 
 type Outgoing = futures_util::stream::SplitSink<WebSocket, Message>;
 
@@ -32,31 +35,31 @@ async fn websocket_handler(
 async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Command>) {
     let (mut outgoing, mut incoming) = socket.split();
 
-    // The seat is claimed the moment the connection is upgraded: no
-    // hello, no token, the next free slot belongs to whoever connects.
-    // The hub answers with the side (already queued into `tx`).
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let (reply_tx, reply_rx) = oneshot::channel();
-    if commands
-        .send(Command::Claim {
-            tx: tx.clone(),
-            reply: reply_tx,
-        })
-        .is_err()
-    {
-        return;
-    }
-
-    let conn: ConnId = match reply_rx.await {
-        Ok(Claimed::Seated { conn }) => conn,
-        Ok(Claimed::Full) => {
-            let _ = send(&mut outgoing, &ServerMessage::Full).await;
-            return;
+    // The client opens with a hello naming the seat it wants.
+    let wanted = loop {
+        match incoming.next().await {
+            Some(Ok(Message::Text(text))) => match serde_json::from_str(text.as_str()) {
+                Ok(ClientMessage::Hello { seat }) => break seat,
+                _ => return,
+            },
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+            _ => return,
         }
-        Err(_) => return,
     };
 
-    // Drain outbound relay messages while the read loop below feeds syncs.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (reply, seated) = oneshot::channel();
+    if commands.send(Command::Join { tx, wanted, reply }).is_err() {
+        return;
+    }
+    let Ok(Some(seat)) = seated.await else {
+        let _ = send(&mut outgoing, &ServerMessage::Full).await;
+        let _ = outgoing.close().await;
+        return;
+    };
+
+    // The room's messages for this seat; ends once the room drops the
+    // seat's sender after `Leave`.
     tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
             if send(&mut outgoing, &message).await.is_err() {
@@ -67,23 +70,26 @@ async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Comman
 
     while let Some(Ok(message)) = incoming.next().await {
         match message {
-            Message::Text(text) => {
-                if let Ok(sync) = serde_json::from_str::<StateSync>(text.as_str()) {
-                    let _ = commands.send(Command::Sync { from: conn, sync });
+            Message::Text(text) => match serde_json::from_str(text.as_str()) {
+                Ok(ClientMessage::Offer { version, state }) => {
+                    let _ = commands.send(Command::Offer {
+                        seat,
+                        version,
+                        state,
+                    });
                 }
-            }
+                Ok(ClientMessage::Hello { .. }) => {}
+                Err(error) => eprintln!("seat {seat}: ignoring malformed message: {error}"),
+            },
             Message::Close(_) => break,
             _ => {}
         }
     }
 
-    let _ = commands.send(Command::Disconnect { conn });
+    let _ = commands.send(Command::Leave { seat });
 }
 
-async fn send(outgoing: &mut Outgoing, message: &ServerMessage) -> Result<(), ()> {
+async fn send(outgoing: &mut Outgoing, message: &ServerMessage) -> Result<(), axum::Error> {
     let text = serde_json::to_string(message).expect("relay messages always serialize");
-    outgoing
-        .send(Message::Text(text.into()))
-        .await
-        .map_err(|_| ())
+    outgoing.send(Message::Text(text.into())).await
 }
