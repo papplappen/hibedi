@@ -14,7 +14,6 @@ use tokio::sync::{mpsc, oneshot};
 use crate::session::{ClaimOutcome, Command};
 
 type Outgoing = futures_util::stream::SplitSink<WebSocket, Message>;
-type Incoming = futures_util::stream::SplitStream<WebSocket>;
 
 pub fn router(commands: mpsc::UnboundedSender<Command>) -> Router {
     Router::new()
@@ -33,25 +32,12 @@ async fn websocket_handler(
 async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Command>) {
     let (mut outgoing, mut incoming) = socket.split();
 
-    let Some(hello) = next_text(&mut incoming).await else {
-        return;
-    };
-    let Ok(ClientMessage::Hello { token }) = serde_json::from_str::<ClientMessage>(&hello) else {
-        let _ = send(
-            &mut outgoing,
-            &ServerMessage::Error {
-                reason: "first message must be hello".to_owned(),
-            },
-        )
-        .await;
-        return;
-    };
-
+    // The seat is claimed the moment the connection is upgraded: no
+    // hello, no token, the next free slot belongs to whoever connects.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (reply_tx, reply_rx) = oneshot::channel();
     if commands
         .send(Command::Claim {
-            token,
             tx: tx.clone(),
             reply: reply_tx,
         })
@@ -76,11 +62,8 @@ async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Comman
             .await;
             return;
         }
-        ClaimOutcome::Seated { side, token } => {
-            let _ = tx.send(ServerMessage::Welcome {
-                side,
-                token: token.clone(),
-            });
+        ClaimOutcome::Seated { side } => {
+            let _ = tx.send(ServerMessage::Welcome { side });
             let _ = commands.send(Command::Sync);
             side
         }
@@ -116,17 +99,6 @@ async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Comman
     }
 
     let _ = commands.send(Command::Disconnect { side, tx });
-}
-
-async fn next_text(incoming: &mut Incoming) -> Option<String> {
-    while let Some(Ok(message)) = incoming.next().await {
-        match message {
-            Message::Text(text) => return Some(text.to_string()),
-            Message::Close(_) => return None,
-            _ => {}
-        }
-    }
-    None
 }
 
 async fn send(outgoing: &mut Outgoing, message: &ServerMessage) -> Result<(), ()> {

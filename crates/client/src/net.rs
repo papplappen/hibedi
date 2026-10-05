@@ -16,31 +16,22 @@ pub enum NetEvent {
     Message(ServerMessage),
 }
 
-pub enum NetCommand {
-    Send(ClientMessage),
-    SetToken(Option<String>),
-}
-
 pub struct NetHandle {
-    commands: Sender<NetCommand>,
+    commands: Sender<ClientMessage>,
     pub events: Receiver<NetEvent>,
 }
 
 impl NetHandle {
     pub fn send(&self, message: ClientMessage) {
-        let _ = self.commands.send(NetCommand::Send(message));
-    }
-
-    pub fn set_token(&self, token: Option<String>) {
-        let _ = self.commands.send(NetCommand::SetToken(token));
+        let _ = self.commands.send(message);
     }
 }
 
-pub fn spawn(url: String, initial_token: Option<String>) -> NetHandle {
+pub fn spawn(url: String) -> NetHandle {
     let (command_tx, command_rx) = mpsc::channel();
     let (event_tx, event_rx) = mpsc::channel();
 
-    thread::spawn(move || run(url, initial_token, command_rx, event_tx));
+    thread::spawn(move || run(url, command_rx, event_tx));
 
     NetHandle {
         commands: command_tx,
@@ -48,12 +39,7 @@ pub fn spawn(url: String, initial_token: Option<String>) -> NetHandle {
     }
 }
 
-fn run(
-    url: String,
-    mut token: Option<String>,
-    command_rx: Receiver<NetCommand>,
-    event_tx: Sender<NetEvent>,
-) {
+fn run(url: String, command_rx: Receiver<ClientMessage>, event_tx: Sender<NetEvent>) {
     let mut backoff = INITIAL_BACKOFF;
 
     loop {
@@ -64,32 +50,15 @@ fn run(
                     let _ = stream.set_nodelay(true);
                 }
 
-                if send_json(
-                    &mut socket,
-                    &ClientMessage::Hello {
-                        token: token.clone(),
-                    },
-                )
-                .is_err()
-                {
-                    let _ = event_tx.send(NetEvent::Disconnected);
-                    thread::sleep(backoff);
-                    backoff = next_backoff(backoff);
-                    continue;
-                }
-
+                // The server seats us the moment we connect; no hello is
+                // exchanged.
                 backoff = INITIAL_BACKOFF;
                 let _ = event_tx.send(NetEvent::Connected);
 
                 'connected: loop {
-                    while let Ok(command) = command_rx.try_recv() {
-                        match command {
-                            NetCommand::SetToken(new_token) => token = new_token,
-                            NetCommand::Send(message) => {
-                                if send_json(&mut socket, &message).is_err() {
-                                    break 'connected;
-                                }
-                            }
+                    while let Ok(message) = command_rx.try_recv() {
+                        if send_json(&mut socket, &message).is_err() {
+                            break 'connected;
                         }
                     }
 

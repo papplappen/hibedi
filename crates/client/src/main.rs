@@ -7,8 +7,6 @@ use hibedi_core::{
 use macroquad::prelude::*;
 use net::{NetEvent, NetHandle};
 
-const SESSION_FILE: &str = ".hibedi_session.json";
-
 const BACKGROUND: Color = Color::from_rgba(17, 21, 30, 255);
 const PANEL: Color = Color::from_rgba(31, 38, 51, 255);
 const PANEL_EDGE: Color = Color::from_rgba(67, 77, 96, 255);
@@ -84,8 +82,7 @@ struct Online {
 
 impl Online {
     fn connect(url: String) -> Self {
-        let token = load_session(&url);
-        let net = net::spawn(url.clone(), token);
+        let net = net::spawn(url.clone());
 
         Self {
             url,
@@ -117,10 +114,8 @@ impl Online {
 
     fn apply(&mut self, message: ServerMessage) {
         match message {
-            ServerMessage::Welcome { side, token } => {
+            ServerMessage::Welcome { side } => {
                 self.side = Some(side);
-                save_session(&self.url, &token);
-                self.net.set_token(Some(token));
             }
             ServerMessage::State {
                 game,
@@ -937,18 +932,4 @@ fn side_color(side: Side) -> Color {
         Side::Red => RED_CELL,
         Side::Green => GREEN_CELL,
     }
-}
-
-fn save_session(url: &str, token: &str) {
-    let value = serde_json::json!({ "url": url, "token": token });
-    let _ = std::fs::write(SESSION_FILE, value.to_string());
-}
-
-fn load_session(url: &str) -> Option<String> {
-    let data = std::fs::read_to_string(SESSION_FILE).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&data).ok()?;
-    if value.get("url")?.as_str()? != url {
-        return None;
-    }
-    value.get("token")?.as_str().map(str::to_owned)
 }

@@ -5,7 +5,6 @@ use crate::{Direction, Game, Side, TokenId};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    Hello { token: Option<String> },
     Place { x: i32, y: i32 },
     Jump { direction: Direction },
     SelectToken { id: TokenId },
@@ -28,7 +27,6 @@ pub enum Status {
 pub enum ServerMessage {
     Welcome {
         side: Side,
-        token: String,
     },
     State {
         game: Option<Game>,
@@ -48,9 +46,6 @@ mod tests {
     #[test]
     fn client_message_round_trips() {
         let messages = [
-            ClientMessage::Hello {
-                token: Some("abc".to_owned()),
-            },
             ClientMessage::Place { x: -1, y: 4 },
             ClientMessage::Jump {
                 direction: Direction::Left,
@@ -77,18 +72,12 @@ mod tests {
 
     #[test]
     fn server_welcome_round_trips() {
-        let message = ServerMessage::Welcome {
-            side: Side::Green,
-            token: "f00d".to_owned(),
-        };
+        let message = ServerMessage::Welcome { side: Side::Green };
         let json = serde_json::to_string(&message).unwrap();
-        assert_eq!(json, r#"{"type":"welcome","side":"green","token":"f00d"}"#);
+        assert_eq!(json, r#"{"type":"welcome","side":"green"}"#);
         let back: ServerMessage = serde_json::from_str(&json).unwrap();
         match back {
-            ServerMessage::Welcome { side, token } => {
-                assert_eq!(side, Side::Green);
-                assert_eq!(token, "f00d");
-            }
+            ServerMessage::Welcome { side } => assert_eq!(side, Side::Green),
             other => panic!("unexpected message: {other:?}"),
         }
     }
