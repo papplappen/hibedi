@@ -1,4 +1,5 @@
 pub mod protocol;
+pub mod session;
 
 use std::collections::HashSet;
 

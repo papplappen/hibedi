@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use hibedi_core::{ClientMessage, ServerMessage};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::session::{ClaimOutcome, Command};
+use crate::session::{Claimed, Command};
 
 type Outgoing = futures_util::stream::SplitSink<WebSocket, Message>;
 
@@ -34,6 +34,8 @@ async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Comman
 
     // The seat is claimed the moment the connection is upgraded: no
     // hello, no token, the next free slot belongs to whoever connects.
+    // The hub answers with the side and the welcome/state messages
+    // (already queued into `tx`).
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (reply_tx, reply_rx) = oneshot::channel();
     if commands
@@ -46,13 +48,9 @@ async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Comman
         return;
     }
 
-    let outcome = match reply_rx.await {
-        Ok(outcome) => outcome,
-        Err(_) => return,
-    };
-
-    let side = match outcome {
-        ClaimOutcome::Full => {
+    let (side, conn) = match reply_rx.await {
+        Ok(Claimed::Seated { side, conn }) => (side, conn),
+        Ok(Claimed::Full) => {
             let _ = send(
                 &mut outgoing,
                 &ServerMessage::Error {
@@ -62,11 +60,7 @@ async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Comman
             .await;
             return;
         }
-        ClaimOutcome::Seated { side } => {
-            let _ = tx.send(ServerMessage::Welcome { side });
-            let _ = commands.send(Command::Sync);
-            side
-        }
+        Err(_) => return,
     };
 
     // Drain outbound state messages while the read loop below feeds commands.
@@ -98,7 +92,7 @@ async fn handle_socket(socket: WebSocket, commands: mpsc::UnboundedSender<Comman
         }
     }
 
-    let _ = commands.send(Command::Disconnect { side, tx });
+    let _ = commands.send(Command::Disconnect { side, conn });
 }
 
 async fn send(outgoing: &mut Outgoing, message: &ServerMessage) -> Result<(), ()> {
