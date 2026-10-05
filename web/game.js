@@ -51,6 +51,10 @@ window.miniquad_add_plugin({
 // The wasm filename is content-hashed by web/build.sh and published in
 // wasm-name.js, so browsers can cache the blob aggressively: a rebuild
 // changes the URL, an unchanged build is served from cache.
+// Logging both the hash and the device pixel ratio makes render-quality
+// mismatches between two tabs diagnosable at a glance (different hash =
+// stale tab; different ratio = per-tab zoom).
+console.log(`hibedi: ${window.WASM_PATH} (devicePixelRatio ${window.devicePixelRatio})`)
 window.load(window.WASM_PATH)
 
 // --- lobby wiring ---
