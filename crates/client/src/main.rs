@@ -1,5 +1,8 @@
 mod net;
 
+#[cfg(target_arch = "wasm32")]
+mod menu;
+
 use hibedi_core::{
     BOARD_HEIGHT, BOARD_WIDTH, Cell, ClientMessage, Coord, Game, GameResult, Phase, ServerMessage,
     Side, Status, WinReason,
@@ -19,6 +22,8 @@ const TOKEN_EDGE: Color = Color::from_rgba(239, 236, 220, 255);
 const GOLD: Color = Color::from_rgba(194, 137, 38, 255);
 const CYAN: Color = Color::from_rgba(33, 139, 154, 255);
 const MUTED: Color = Color::from_rgba(169, 178, 191, 255);
+
+const COPIED_TOAST: &str = "Link copied to the clipboard";
 
 struct BoardLayout {
     x: f32,
@@ -63,15 +68,29 @@ impl BoardLayout {
     }
 }
 
-#[derive(Default)]
 struct Buttons {
     primary: Option<Rect>,
     leave: Option<Rect>,
+    copy: Option<Rect>,
+    back: Option<Rect>,
+}
+
+struct RoomInfo {
+    code: String,
+    #[cfg(target_arch = "wasm32")]
+    share_url: String,
 }
 
 struct Online {
-    url: String,
     net: NetHandle,
+    /// Native only: the WebSocket URL, shown on the waiting screen.
+    url: Option<String>,
+    /// Wasm only: the hosted room, shown while waiting for the opponent.
+    room: Option<RoomInfo>,
+    /// Wasm only: the room code while joining as guest.
+    joining: Option<String>,
+    /// Wasm only: a terminal disconnect (the host left; no reconnecting).
+    closed: Option<String>,
     side: Option<Side>,
     game: Option<Game>,
     opponent_present: bool,
@@ -81,12 +100,16 @@ struct Online {
 }
 
 impl Online {
+    #[cfg(not(target_arch = "wasm32"))]
     fn connect(url: String) -> Self {
         let net = net::spawn(url.clone());
 
         Self {
-            url,
             net,
+            url: Some(url),
+            room: None,
+            joining: None,
+            closed: None,
             side: None,
             game: None,
             opponent_present: false,
@@ -96,20 +119,64 @@ impl Online {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn joining(code: String) -> Self {
+        Self {
+            net: NetHandle,
+            url: None,
+            room: None,
+            joining: Some(code),
+            closed: None,
+            side: None,
+            game: None,
+            opponent_present: false,
+            status: Status::Waiting,
+            connected: false,
+            toast: None,
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn hosted(code: String, share_url: String) -> Self {
+        Self {
+            net: NetHandle,
+            url: None,
+            room: Some(RoomInfo { code, share_url }),
+            joining: None,
+            closed: None,
+            side: None,
+            game: None,
+            opponent_present: false,
+            status: Status::Waiting,
+            connected: true,
+            toast: None,
+        }
+    }
+
+    fn is_p2p(&self) -> bool {
+        self.room.is_some() || self.joining.is_some()
+    }
+
     fn pump(&mut self) {
-        while let Ok(event) = self.net.events.try_recv() {
+        while let Some(event) = self.net.poll() {
             match event {
-                NetEvent::Connected => self.connected = true,
+                NetEvent::Connected => {
+                    self.connected = true;
+                    self.joining = None;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
                 NetEvent::Disconnected => self.connected = false,
+                NetEvent::Closed { reason } => self.closed = Some(reason),
                 NetEvent::Message(message) => self.apply(message),
+                NetEvent::Copied => {
+                    self.toast = Some((COPIED_TOAST.to_owned(), get_time() + 3.0));
+                }
+                // Menu-scoped events; only the menu consumes those.
+                NetEvent::Booted { .. } | NetEvent::Room { .. } => {}
             }
         }
 
-        if let Some((_, expires)) = &self.toast
-            && get_time() > *expires
-        {
-            self.toast = None;
-        }
+        expire_toast(&mut self.toast);
     }
 
     fn apply(&mut self, message: ServerMessage) {
@@ -155,53 +222,80 @@ impl Online {
         self.connected && self.status == Status::Paused
     }
 
-    fn handle_click(&mut self, layout: &BoardLayout, buttons: &Buttons, mouse: Vec2) {
+    fn handle_click(&mut self, layout: &BoardLayout, buttons: &Buttons, mouse: Vec2) -> bool {
         if let Some(rect) = buttons.primary
             && point_in_rect(mouse, rect)
             && self.wants_new_game()
         {
             self.net.send(ClientMessage::NewGame);
-            return;
+            return false;
         }
         if let Some(rect) = buttons.leave
             && point_in_rect(mouse, rect)
             && self.wants_leave()
         {
             self.net.send(ClientMessage::Leave);
-            return;
+            return false;
+        }
+
+        // Wasm-only controls on the waiting screen.
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(rect) = buttons.copy
+                && point_in_rect(mouse, rect)
+                && let Some(room) = &self.room
+            {
+                self.net.copy(room.share_url.clone());
+                return false;
+            }
+            if let Some(rect) = buttons.back
+                && point_in_rect(mouse, rect)
+            {
+                self.net.leave();
+                return true;
+            }
         }
 
         if !self.can_play() {
-            return;
+            return false;
         }
         let (Some(game), Some(coord)) = (&self.game, layout.coord_at(mouse)) else {
-            return;
+            return false;
         };
         if let Some(action) = client_action(game, coord) {
             self.net.send(action);
         }
+        false
+    }
+}
+
+/// Draws a timed toast at the bottom of the screen; silently expires.
+fn draw_toast(text: &str, expires: f64) {
+    if get_time() > expires {
+        return;
     }
 
-    fn draw_toast(&self) {
-        let Some((text, expires)) = &self.toast else {
-            return;
-        };
-        if get_time() > *expires {
-            return;
-        }
+    let width = (screen_width() - 60.0).min(520.0);
+    let x = (screen_width() - width) / 2.0;
+    let y = screen_height() - 104.0;
+    draw_round_rect(x, y, width, 66.0, 12.0, PANEL);
+    draw_rectangle_lines(x, y, width, 66.0, 12.0, GOLD);
+    draw_wrapped_text(text, x + 18.0, y + 28.0, width - 36.0, 19.0, 15.0, WHITE);
+}
 
-        let width = (screen_width() - 60.0).min(520.0);
-        let x = (screen_width() - width) / 2.0;
-        let y = screen_height() - 104.0;
-        draw_round_rect(x, y, width, 66.0, 12.0, PANEL);
-        draw_rectangle_lines(x, y, width, 66.0, 12.0, GOLD);
-        draw_wrapped_text(text, x + 18.0, y + 28.0, width - 36.0, 19.0, 15.0, WHITE);
+fn expire_toast(toast: &mut Option<(String, f64)>) {
+    if let Some((_, expires)) = toast
+        && get_time() > *expires
+    {
+        *toast = None;
     }
 }
 
 enum Mode {
     Local { game: Game },
     Online(Online),
+    #[cfg(target_arch = "wasm32")]
+    Menu(menu::Menu),
 }
 
 impl Mode {
@@ -214,14 +308,19 @@ impl Mode {
                 .map_or((BOARD_WIDTH + 2, BOARD_HEIGHT + 2), |game| {
                     (game.board().storage_width(), game.board().storage_height())
                 }),
+            // The menu shows no board; use the default board size.
+            #[cfg(target_arch = "wasm32")]
+            Self::Menu(_) => (BOARD_WIDTH + 2, BOARD_HEIGHT + 2),
         }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Args {
     server: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_args() -> Args {
     let mut server = None;
     let mut args = std::env::args().skip(1);
@@ -258,6 +357,7 @@ fn parse_args() -> Args {
     Args { server }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn normalize_url(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.starts_with("wss://") {
@@ -278,28 +378,64 @@ fn new_local_game() -> Game {
 
 #[macroquad::main(window_conf)]
 async fn main() {
-    let args = parse_args();
-    let mut mode = match args.server {
-        Some(raw) => {
-            let url = normalize_url(&raw);
-            println!("connecting to {url}");
-            Mode::Online(Online::connect(url))
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut mode = {
+        let args = parse_args();
+        match args.server {
+            Some(raw) => {
+                let url = normalize_url(&raw);
+                println!("connecting to {url}");
+                Mode::Online(Online::connect(url))
+            }
+            None => Mode::Local {
+                game: new_local_game(),
+            },
         }
-        None => Mode::Local {
-            game: new_local_game(),
-        },
     };
+    #[cfg(target_arch = "wasm32")]
+    let mut mode = Mode::Menu(menu::Menu::new());
+
+    // Tells the JS bridge to push the page's room code, if any.
+    #[cfg(target_arch = "wasm32")]
+    net::bridge_ready();
 
     loop {
-        if let Mode::Online(online) = &mut mode {
-            online.pump();
+        // Networking first; the menu may switch modes while pumping.
+        let mut transition: Option<Mode> = None;
+        match &mut mode {
+            Mode::Local { .. } => {}
+            Mode::Online(online) => online.pump(),
+            #[cfg(target_arch = "wasm32")]
+            Mode::Menu(menu) => {
+                if let Some(next_mode) = menu.update() {
+                    transition = Some(next_mode);
+                }
+            }
         }
 
         let (storage_width, storage_height) = mode.storage_dims();
         let layout = board_layout(storage_width, storage_height);
         let buttons = buttons_for(&mode, &layout);
 
-        handle_input(&mut mode, &layout, &buttons);
+        // Input, possibly switching modes (wasm menu transitions).
+        if transition.is_none() {
+            match &mut mode {
+                Mode::Local { game } => handle_local_input(game, &layout, &buttons),
+                Mode::Online(online) => {
+                    handle_online_input(online, &layout, &buttons, &mut transition);
+                    // A left peer ends a P2P session for good.
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(reason) = online.closed.take() {
+                        transition = Some(Mode::Menu(menu::Menu::with_toast(reason)));
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                Mode::Menu(_) => {}
+            }
+        }
+        if let Some(next) = transition {
+            mode = next;
+        }
 
         clear_background(BACKGROUND);
         draw_scene(&mode, &layout, &buttons);
@@ -308,29 +444,40 @@ async fn main() {
     }
 }
 
-fn handle_input(mode: &mut Mode, layout: &BoardLayout, buttons: &Buttons) {
+fn handle_local_input(game: &mut Game, layout: &BoardLayout, buttons: &Buttons) {
     let clicked = is_mouse_button_pressed(MouseButton::Left);
     let mouse: Vec2 = mouse_position().into();
 
-    match mode {
-        Mode::Local { game } => {
-            if is_key_pressed(KeyCode::R)
-                || (clicked
-                    && buttons
-                        .primary
-                        .is_some_and(|rect| point_in_rect(mouse, rect)))
-            {
-                *game = new_local_game();
-            } else if clicked && let Some(coord) = layout.coord_at(mouse) {
-                handle_local_click(game, coord);
-            }
+    if is_key_pressed(KeyCode::R)
+        || (clicked && buttons.primary.is_some_and(|rect| point_in_rect(mouse, rect)))
+    {
+        *game = new_local_game();
+    } else if clicked && let Some(coord) = layout.coord_at(mouse) {
+        handle_local_click(game, coord);
+    }
+}
+
+fn handle_online_input(
+    online: &mut Online,
+    layout: &BoardLayout,
+    buttons: &Buttons,
+    next: &mut Option<Mode>,
+) {
+    let clicked = is_mouse_button_pressed(MouseButton::Left);
+    let mouse: Vec2 = mouse_position().into();
+
+    if is_key_pressed(KeyCode::R) && online.wants_new_game() {
+        online.net.send(ClientMessage::NewGame);
+    } else if clicked && online.handle_click(layout, buttons, mouse) {
+        // The back button was pressed: leave the room and return to the
+        // menu. Only reachable on wasm, where the back button exists.
+        #[cfg(target_arch = "wasm32")]
+        {
+            *next = Some(Mode::Menu(menu::Menu::new()));
         }
-        Mode::Online(online) => {
-            if is_key_pressed(KeyCode::R) && online.wants_new_game() {
-                online.net.send(ClientMessage::NewGame);
-            } else if clicked {
-                online.handle_click(layout, buttons, mouse);
-            }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = next;
         }
     }
 }
@@ -411,18 +558,35 @@ fn buttons_for(mode: &Mode, layout: &BoardLayout) -> Buttons {
         Mode::Local { .. } => Buttons {
             primary: Some(desktop_or_compact_rect(layout, 438.0)),
             leave: None,
+            copy: None,
+            back: None,
         },
-        Mode::Online(online) => Buttons {
-            primary: online.wants_new_game().then(|| {
-                if layout.compact {
-                    compact_button_rect(layout, 0.0)
-                } else {
-                    desktop_or_compact_rect(layout, 420.0)
-                }
-            }),
-            leave: online
-                .wants_leave()
-                .then(|| leave_rect(layout, online.wants_new_game())),
+        Mode::Online(online) => {
+            let waiting = online.game.is_none();
+            let panel = waiting_panel_rect(layout, online.is_p2p());
+            Buttons {
+                primary: online.wants_new_game().then(|| {
+                    if layout.compact {
+                        compact_button_rect(layout, 0.0)
+                    } else {
+                        desktop_or_compact_rect(layout, 420.0)
+                    }
+                }),
+                leave: online
+                    .wants_leave()
+                    .then(|| leave_rect(layout, online.wants_new_game())),
+                copy: (waiting && online.room.is_some())
+                    .then(|| waiting_button_rect(&panel, true)),
+                back: (waiting && online.is_p2p())
+                    .then(|| waiting_button_rect(&panel, false)),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        Mode::Menu(_) => Buttons {
+            primary: None,
+            leave: None,
+            copy: None,
+            back: None,
         },
     }
 }
@@ -457,6 +621,31 @@ fn leave_rect(layout: &BoardLayout, primary_visible: bool) -> Rect {
     }
 }
 
+/// The centered panel behind the waiting screen; taller when it also
+/// carries the room code and buttons (wasm).
+fn waiting_panel_rect(layout: &BoardLayout, tall: bool) -> Rect {
+    let width = if layout.compact {
+        screen_width() - 48.0
+    } else {
+        560.0
+    };
+    let height = if tall { 268.0 } else { 210.0 };
+    let x = (screen_width() - width) / 2.0;
+    let y = ((screen_height() - height) / 2.0 - 10.0).max(90.0);
+    Rect::new(x, y, width, height)
+}
+
+fn waiting_button_rect(panel: &Rect, right: bool) -> Rect {
+    let width = 150.0;
+    let height = 36.0;
+    let x = if right {
+        panel.x + panel.w - 24.0 - width
+    } else {
+        panel.x + 24.0
+    };
+    Rect::new(x, panel.y + panel.h - 24.0 - height, width, height)
+}
+
 fn draw_scene(mode: &Mode, layout: &BoardLayout, buttons: &Buttons) {
     match mode {
         Mode::Local { game } => {
@@ -471,10 +660,14 @@ fn draw_scene(mode: &Mode, layout: &BoardLayout, buttons: &Buttons) {
                     draw_board(game, layout);
                     draw_panel(game, layout, buttons, Some(online));
                 }
-                None => draw_waiting(online, layout),
+                None => draw_waiting(online, layout, buttons),
             }
-            online.draw_toast();
+            if let Some((text, expires)) = &online.toast {
+                draw_toast(text, *expires);
+            }
         }
+        #[cfg(target_arch = "wasm32")]
+        Mode::Menu(menu) => menu.draw(),
     }
 }
 
@@ -768,49 +961,113 @@ fn draw_button(rect: Rect, label: &str, fill: Color) {
     );
 }
 
-fn draw_waiting(online: &Online, layout: &BoardLayout) {
-    let width = if layout.compact {
-        screen_width() - 48.0
+fn draw_waiting(online: &Online, layout: &BoardLayout, buttons: &Buttons) {
+    let panel = waiting_panel_rect(layout, online.is_p2p());
+    draw_round_rect(panel.x, panel.y, panel.w, panel.h, 18.0, PANEL);
+    draw_rectangle_lines(panel.x, panel.y, panel.w, panel.h, 18.0, PANEL_EDGE);
+
+    if online.is_p2p() {
+        let title = if online.room.is_some() {
+            "Waiting for a second player"
+        } else {
+            "Joining room"
+        };
+        let title_width = measure_text(title, None, 24, 1.0).width;
+        draw_text(
+            title,
+            panel.x + (panel.w - title_width) / 2.0,
+            panel.y + 64.0,
+            24.0,
+            WHITE,
+        );
+
+        if let Some(room) = &online.room {
+            let label = "ROOM CODE";
+            let label_width = measure_text(label, None, 15, 1.0).width;
+            draw_text(
+                label,
+                panel.x + (panel.w - label_width) / 2.0,
+                panel.y + 108.0,
+                15.0,
+                MUTED,
+            );
+            let code_width = measure_text(&room.code, None, 38, 1.0).width;
+            draw_text(
+                &room.code,
+                panel.x + (panel.w - code_width) / 2.0,
+                panel.y + 152.0,
+                38.0,
+                GOLD,
+            );
+            draw_wrapped_text(
+                "Send your opponent this page's link (COPY LINK) or the room code.",
+                panel.x + 34.0,
+                panel.y + 186.0,
+                panel.w - 68.0,
+                20.0,
+                15.0,
+                MUTED,
+            );
+        } else if let Some(code) = &online.joining {
+            let body = format!("Connecting to room {code}…");
+            draw_wrapped_text(
+                &body,
+                panel.x + 34.0,
+                panel.y + 120.0,
+                panel.w - 68.0,
+                22.0,
+                16.0,
+                MUTED,
+            );
+        } else {
+            draw_wrapped_text(
+                "Connected to the room; waiting for the opponent to join.",
+                panel.x + 34.0,
+                panel.y + 120.0,
+                panel.w - 68.0,
+                22.0,
+                16.0,
+                MUTED,
+            );
+        }
+
+        if let Some(rect) = buttons.back {
+            draw_button(rect, "BACK", PANEL_EDGE);
+        }
+        if let Some(rect) = buttons.copy {
+            draw_button(rect, "COPY LINK", GOLD);
+        }
     } else {
-        560.0
-    };
-    let height = 210.0;
-    let x = (screen_width() - width) / 2.0;
-    let y = ((screen_height() - height) / 2.0 - 10.0).max(90.0);
+        let (title, body) = match (&online.connected, &online.url) {
+            (false, Some(url)) => ("Connection lost", format!("Reconnecting to {url}…")),
+            _ => (
+                "Waiting for a second player",
+                format!(
+                    "Both clients must connect to {}",
+                    online.url.as_deref().unwrap_or("the server")
+                ),
+            ),
+        };
 
-    draw_round_rect(x, y, width, height, 18.0, PANEL);
-    draw_rectangle_lines(x, y, width, height, 18.0, PANEL_EDGE);
-
-    let (title, body) = if !online.connected {
-        (
-            "Connection lost",
-            format!("Reconnecting to {}…", online.url),
-        )
-    } else {
-        (
-            "Waiting for a second player",
-            format!("Both clients must connect to {}", online.url),
-        )
-    };
-
-    let title_width = measure_text(title, None, 24, 1.0).width;
-    draw_text(
-        title,
-        x + (width - title_width) / 2.0,
-        y + 74.0,
-        24.0,
-        WHITE,
-    );
-    draw_wrapped_text(&body, x + 34.0, y + 116.0, width - 68.0, 22.0, 16.0, MUTED);
-    draw_wrapped_text(
-        "Seats are assigned automatically: first red, second green.",
-        x + 34.0,
-        y + 164.0,
-        width - 68.0,
-        20.0,
-        15.0,
-        MUTED,
-    );
+        let title_width = measure_text(title, None, 24, 1.0).width;
+        draw_text(
+            title,
+            panel.x + (panel.w - title_width) / 2.0,
+            panel.y + 74.0,
+            24.0,
+            WHITE,
+        );
+        draw_wrapped_text(&body, panel.x + 34.0, panel.y + 116.0, panel.w - 68.0, 22.0, 16.0, MUTED);
+        draw_wrapped_text(
+            "Seats are assigned automatically: first red, second green.",
+            panel.x + 34.0,
+            panel.y + 164.0,
+            panel.w - 68.0,
+            20.0,
+            15.0,
+            MUTED,
+        );
+    }
 }
 
 fn online_status_text(online: &Online, game: &Game) -> String {

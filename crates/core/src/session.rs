@@ -119,6 +119,17 @@ impl Session {
         self.seats[seat_index(side)]
     }
 
+    /// The session's game, if one is running.
+    pub fn game(&self) -> Option<&Game> {
+        self.game.as_ref()
+    }
+
+    /// Replaces the session's game with `game` — e.g. restored from a
+    /// state snapshot. The next turn continues from it unchanged.
+    pub fn set_game(&mut self, game: Game) {
+        self.game = Some(game);
+    }
+
     fn apply_action(
         &mut self,
         side: Side,

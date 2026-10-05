@@ -1,27 +1,28 @@
+//! Native transport: a background thread speaking JSON over a WebSocket
+//! to the dedicated server (crates/server).
+
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use hibedi_core::{ClientMessage, ServerMessage};
-use tungstenite::stream::MaybeTlsStream;
+use hibedi_core::ClientMessage;
+
+use super::NetEvent;
 
 const READ_POLL: Duration = Duration::from_millis(100);
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
-#[allow(clippy::large_enum_variant)]
-pub enum NetEvent {
-    Connected,
-    Disconnected,
-    Message(ServerMessage),
-}
-
 pub struct NetHandle {
     commands: Sender<ClientMessage>,
-    pub events: Receiver<NetEvent>,
+    events: Receiver<NetEvent>,
 }
 
 impl NetHandle {
+    pub fn poll(&self) -> Option<NetEvent> {
+        self.events.try_recv().ok()
+    }
+
     pub fn send(&self, message: ClientMessage) {
         let _ = self.commands.send(message);
     }
@@ -39,13 +40,13 @@ pub fn spawn(url: String) -> NetHandle {
     }
 }
 
-fn run(url: String, command_rx: Receiver<ClientMessage>, event_tx: Sender<NetEvent>) {
+fn run(url: String, command_rx: Receiver<ClientMessage>, event_tx: mpsc::Sender<NetEvent>) {
     let mut backoff = INITIAL_BACKOFF;
 
     loop {
         match tungstenite::connect(&url) {
             Ok((mut socket, _)) => {
-                if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+                if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_mut() {
                     let _ = stream.set_read_timeout(Some(READ_POLL));
                     let _ = stream.set_nodelay(true);
                 }
@@ -65,7 +66,7 @@ fn run(url: String, command_rx: Receiver<ClientMessage>, event_tx: Sender<NetEve
                     match socket.read() {
                         Ok(tungstenite::Message::Text(text)) => {
                             if let Ok(message) =
-                                serde_json::from_str::<ServerMessage>(text.as_str())
+                                serde_json::from_str::<hibedi_core::ServerMessage>(text.as_str())
                             {
                                 let _ = event_tx.send(NetEvent::Message(message));
                             }
@@ -100,7 +101,7 @@ fn next_backoff(current: Duration) -> Duration {
 }
 
 fn send_json(
-    socket: &mut tungstenite::WebSocket<MaybeTlsStream<std::net::TcpStream>>,
+    socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
     message: &ClientMessage,
 ) -> Result<(), tungstenite::Error> {
     let json = serde_json::to_string(message).expect("client messages always serialize");
