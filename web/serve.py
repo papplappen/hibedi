@@ -71,6 +71,13 @@ class Server(socketserver.ThreadingTCPServer):
 
 
 if __name__ == "__main__":
-    with Server(("", PORT), Handler) as httpd:
-        print(f"serving {ROOT} at http://127.0.0.1:{PORT} (Cache-Control: max-age={MAX_AGE})")
-        httpd.serve_forever()
+    try:
+        server = Server(("", PORT), Handler)
+    except OSError as error:
+        raise SystemExit(
+            f"cannot serve on port {PORT}: {error}\n"
+            f"another server is probably still running — "
+            f"stop it or pick another port: web/run.sh {PORT + 1}"
+        ) from error
+    print(f"serving {ROOT} at http://127.0.0.1:{PORT} (Cache-Control: max-age={MAX_AGE})")
+    server.serve_forever()
