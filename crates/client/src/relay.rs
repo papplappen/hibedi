@@ -1,7 +1,7 @@
 //! Native multiplayer through the relay server (crates/server): the
 //! native counterpart of the web page's rooms. [`join`] waits, before
-//! the game starts, until every seat is taken; the [`RelaySession`] it
-//! returns then syncs game states.
+//! the game starts, until every seat is taken, then starts the match
+//! with a [`RelaySession`] that syncs game states.
 //!
 //! A background thread owns the WebSocket and our copy of the shared,
 //! versioned state (see the protocol crate). It versions what we
@@ -15,13 +15,15 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
+use bevy::platform::cell::SyncCell;
+use bevy::prelude::*;
 use hibedi_relay_protocol::{ClientMessage, ServerMessage};
-use macroquad::window::next_frame;
 use serde_json::Value;
 use tungstenite::stream::MaybeTlsStream;
 
+use crate::play::Match;
 use crate::session::Session;
-use crate::ui;
+use crate::ui::Notice;
 
 /// How long the connection thread waits for an outgoing state before it
 /// checks the socket again; bounds the latency of incoming messages.
@@ -31,34 +33,52 @@ const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 type Socket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
 
-/// Connects to the relay at `url` and waits, showing a waiting screen,
-/// until every seat is taken. Exits the process if the relay is full.
-pub async fn join(url: String) -> RelaySession {
-    let mut session = RelaySession::connect(url.clone());
-    loop {
-        session.process();
-        if session.refused {
-            eprintln!("every seat on {url} is taken");
-            std::process::exit(1);
-        }
-        if session.everyone_online() {
-            return session;
-        }
-        let (title, body) = match session.seat {
-            Some(_) => (
-                "Waiting for the other player",
-                format!("Start a second client with --server {url}"),
-            ),
-            None => ("Connecting…", format!("Connecting to {url}")),
-        };
-        ui::message_screen(title, &body);
-        next_frame().await;
+/// Connects to the relay at `url`; the match starts once every seat is
+/// taken. Until then the screen tells what we are waiting for. Exits
+/// the app if the relay is full.
+pub fn join(app: &mut App, url: String) {
+    app.insert_resource(Lobby {
+        session: RelaySession::connect(url.clone()),
+        url,
+    })
+    .add_systems(Update, wait_for_seats.run_if(resource_exists::<Lobby>));
+}
+
+/// The session while it waits for the other player.
+#[derive(Resource)]
+struct Lobby {
+    session: RelaySession,
+    url: String,
+}
+
+fn wait_for_seats(world: &mut World) {
+    let mut lobby = world.resource_mut::<Lobby>();
+    lobby.session.process();
+    if lobby.session.refused {
+        error!("every seat on {} is taken", lobby.url);
+        world.write_message(AppExit::from_code(1));
+        return;
     }
+    if lobby.session.everyone_online() {
+        let Lobby { session, .. } = world.remove_resource().expect("the lobby is waiting");
+        world.insert_resource(Match::online(Box::new(session)));
+        return;
+    }
+    let notice = match lobby.session.seat {
+        Some(_) => Notice::new(
+            "Waiting for the other player",
+            format!("Start a second client with --server {}", lobby.url),
+        ),
+        None => Notice::new("Connecting…", format!("Connecting to {}", lobby.url)),
+    };
+    world.resource_mut::<Notice>().set_if_neq(notice);
 }
 
 pub struct RelaySession {
     outbox: Sender<Value>,
-    inbox: Receiver<Event>,
+    /// In a `SyncCell` to make the session `Sync`; only read through
+    /// `&mut self`.
+    inbox: SyncCell<Receiver<Event>>,
     /// Our seat; kept while reconnecting.
     seat: Option<usize>,
     /// Per seat, whether a player holds it; empty while disconnected.
@@ -87,7 +107,7 @@ impl RelaySession {
         thread::spawn(move || Connection::new(incoming).run(&url, &outgoing));
         Self {
             outbox,
-            inbox,
+            inbox: SyncCell::new(inbox),
             seat: None,
             occupied: Vec::new(),
             refused: false,
@@ -97,7 +117,7 @@ impl RelaySession {
 
     /// Applies everything the connection thread reported.
     fn process(&mut self) {
-        while let Ok(event) = self.inbox.try_recv() {
+        while let Ok(event) = self.inbox.get().try_recv() {
             match event {
                 Event::Seats { seat, occupied } => {
                     self.seat = Some(seat);
@@ -235,7 +255,7 @@ impl Connection {
                         return Ended::Refused;
                     }
                     Err(error) => {
-                        eprintln!("ignoring malformed relay message: {error}");
+                        warn!("ignoring malformed relay message: {error}");
                         continue;
                     }
                 };

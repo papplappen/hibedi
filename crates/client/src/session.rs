@@ -3,7 +3,7 @@
 //! Everything about finding other players (rooms, invitations, waiting
 //! until the seats fill) happens before the game starts and outside of
 //! it: in the web page (web/main.js), or natively in
-//! [`crate::relay::join`]. Once the game runs, a session only syncs game
+//! [`crate::relay`]. Once the game runs, a session only syncs game
 //! states between the seats:
 //!
 //! - wasm: [`crate::web::WebSession`], the page's peer-to-peer room,
@@ -13,7 +13,8 @@
 
 use serde_json::Value;
 
-pub trait Session {
+/// `Send + Sync`: the session lives in a Bevy resource.
+pub trait Session: Send + Sync {
     /// Our seat; seat `n` plays the `n`-th side.
     fn seat(&self) -> usize;
 

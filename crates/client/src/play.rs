@@ -2,15 +2,43 @@
 //! optionally the session it is shared through. The session never
 //! touches the rules; it only decides whose clicks count (our seat) and
 //! carries the resulting game states between the players.
+//!
+//! The [`Match`] resource is the single source of truth the views draw
+//! from. It is only marked changed when something visible changed, so
+//! views can redraw on `resource_changed::<Match>`.
 
+use bevy::prelude::*;
 use hibedi_core::{BOARD_HEIGHT, BOARD_WIDTH, Coord, Game, Phase, Side};
 
 use crate::session::Session;
 
+pub fn plugin(app: &mut App) {
+    app.add_systems(PreUpdate, sync_session.run_if(resource_exists::<Match>))
+        .add_systems(Update, new_game_on_key.run_if(resource_exists::<Match>));
+}
+
+/// Pulls in what the session received, marking the match changed only
+/// if anything did.
+fn sync_session(mut play: ResMut<Match>) {
+    if play.bypass_change_detection().update() {
+        play.set_changed();
+    }
+}
+
+fn new_game_on_key(keys: Res<ButtonInput<KeyCode>>, mut play: ResMut<Match>) {
+    if keys.just_pressed(KeyCode::KeyR) {
+        play.start_new_game();
+    }
+}
+
+#[derive(Resource)]
 pub struct Match {
     /// `None` only online, until the first seat's game arrives.
     game: Option<Game>,
     session: Option<Box<dyn Session>>,
+    /// Whether the other player is connected, as of the last update;
+    /// `None` in hotseat.
+    opponent_online: Option<bool>,
 }
 
 impl Match {
@@ -19,6 +47,7 @@ impl Match {
         Self {
             game: Some(new_game()),
             session: None,
+            opponent_online: None,
         }
     }
 
@@ -26,6 +55,7 @@ impl Match {
     /// through the session; a new one is dealt by the first seat.
     pub fn online(session: Box<dyn Session>) -> Self {
         let mut play = Self {
+            opponent_online: Some(session.everyone_online()),
             game: None,
             session: Some(session),
         };
@@ -48,9 +78,7 @@ impl Match {
 
     /// Whether the other player is connected; `None` in hotseat.
     pub fn opponent_online(&self) -> Option<bool> {
-        self.session
-            .as_ref()
-            .map(|session| session.everyone_online())
+        self.opponent_online
     }
 
     /// Whether the board takes our clicks now.
@@ -60,6 +88,15 @@ impl Match {
                 && self
                     .opponent_online()
                     .is_none_or(|online| online && self.my_side() == Some(game.current_player()))
+        })
+    }
+
+    /// Whether hints for the player to move are shown: always in
+    /// hotseat, online only on our own turn.
+    pub fn shows_hints(&self) -> bool {
+        self.game.as_ref().is_some_and(|game| {
+            self.my_side()
+                .is_none_or(|side| side == game.current_player())
         })
     }
 
@@ -78,11 +115,18 @@ impl Match {
         }
     }
 
-    /// Adopts what the session received and takes steps that need no
-    /// decision. Call once per frame.
-    pub fn update(&mut self) {
-        self.adopt_received();
-        self.auto_select();
+    /// Pulls in what the session received and takes steps that need no
+    /// decision. Returns whether anything changed. Call once per frame.
+    pub fn update(&mut self) -> bool {
+        let online = self
+            .session
+            .as_ref()
+            .map(|session| session.everyone_online());
+        let presence_changed = online != self.opponent_online;
+        self.opponent_online = online;
+        let adopted = self.adopt_received();
+        let selected = self.auto_select();
+        presence_changed || adopted || selected
     }
 
     pub fn start_new_game(&mut self) {
@@ -118,31 +162,40 @@ impl Match {
         }
     }
 
-    fn adopt_received(&mut self) {
+    /// Adopts the state the session received, if any.
+    fn adopt_received(&mut self) -> bool {
         let Some(state) = self.session.as_mut().and_then(|session| session.receive()) else {
-            return;
+            return false;
         };
         match serde_json::from_value(state) {
-            Ok(game) => self.game = Some(game),
-            Err(error) => eprintln!("ignoring an unreadable game state: {error}"),
+            Ok(game) => {
+                self.game = Some(game);
+                true
+            }
+            Err(error) => {
+                warn!("ignoring an unreadable game state: {error}");
+                false
+            }
         }
     }
 
     /// With exactly one token to choose there is no decision to make:
     /// select it right away.
-    fn auto_select(&mut self) {
+    fn auto_select(&mut self) -> bool {
         if !self.can_move() {
-            return;
+            return false;
         }
         let Some(game) = &mut self.game else {
-            return;
+            return false;
         };
         if game.phase() == Phase::ChooseActivatedToken
             && let [only] = game.selectable_activated_tokens()[..]
             && game.try_select_activated_token(only)
         {
             self.publish();
+            return true;
         }
+        false
     }
 
     fn set_game(&mut self, game: Game) {
@@ -158,6 +211,5 @@ impl Match {
 }
 
 fn new_game() -> Game {
-    // `macroquad::prelude` re-exports quad_rand as `rand`; name the crate.
-    Game::new_random(BOARD_WIDTH, BOARD_HEIGHT, &mut ::rand::rng())
+    Game::new_random(BOARD_WIDTH, BOARD_HEIGHT, &mut rand::rng())
 }

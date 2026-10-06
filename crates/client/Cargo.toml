@@ -5,20 +5,33 @@ edition.workspace = true
 
 [dependencies]
 hibedi-core.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 rand.workspace = true
-# Pinned to a master revision: 0.4.16 (newest release) still has the
-# nondeterministic font-atlas growth that deletes its GL texture mid-frame
-# and corrupts or blurs text (macroquad #1006, #1054). Master fixes the
-# atlas packing; switch back to crates.io once the fix is released.
-macroquad = { git = "https://github.com/not-fl3/macroquad", rev = "8d602d3f8ebb8a3a582ee15d92983bbb81ee3ef6" }
+# A 2D UI game: Bevy's rendering and UI, without the 3D, audio and
+# gamepad stacks. Text uses the embedded fonts (assets/), so Bevy's
+# default font is left out too, and taps are read without picking
+# (src/ui/tap.rs).
+bevy = { version = "0.19.1", default-features = false, features = [
+    "default_app",
+    "std",
+    "multi_threaded",
+    "bevy_winit",
+    "ui_api",
+    "ui_bevy_render",
+    "mouse",
+    "keyboard",
+    "touch",
+    "webgl2",
+    "x11",
+    "wayland",
+] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 hibedi-relay-protocol.workspace = true
 tungstenite = "0.30"
 
-# For the getrandom custom-backend hook (see src/web.rs); on wasm the
-# entropy comes from the page, not wasm-bindgen.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.4", default-features = false }
+bevy = { version = "0.19.1", default-features = false, features = ["web"] }
+wasm-bindgen = "0.2"
+# Entropy for `rand` from the browser (crypto.getRandomValues).
+getrandom = { version = "0.4", features = ["wasm_js"] }

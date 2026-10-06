@@ -1,5 +1,5 @@
 /target
-web/hibedi-client.*.wasm
-web/wasm-name.js
+web/hibedi-client.*
+web/build.js
 
 *.png

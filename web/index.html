@@ -8,9 +8,8 @@
   <link rel="stylesheet" href="./page.css">
 </head>
 <body>
-  <!-- The game's canvas; the miniquad loader looks it up when its script
-       runs, so it exists from the start, covered by the page until the
-       game starts. -->
+  <!-- The game's canvas; the game looks it up when it starts, so it
+       exists from the start, covered by the page until then. -->
   <canvas id="glcanvas" tabindex="1"></canvas>
 
   <main id="page">
@@ -53,8 +52,7 @@
     </div>
   </main>
 
-  <script src="./mq_js_bundle.js"></script>
-  <script src="./wasm-name.js"></script>
+  <script src="./build.js"></script>
   <script type="module" src="./main.js"></script>
 </body>
 </html>

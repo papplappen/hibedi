@@ -15,14 +15,14 @@ body {
   height: 100%;
 }
 
-/* gl.js sizes the drawing buffer from the canvas CSS size. 100dvh
-   matches the visible viewport on iOS Safari, where 100vh extends
-   under the URL bar. */
+/* The game fits its canvas to the body. 100dvh matches the visible
+   viewport on iOS Safari, where 100vh extends under the URL bar. */
+body {
+  height: 100dvh;
+}
+
 #glcanvas {
   display: block;
-  width: 100vw;
-  height: 100vh;
-  height: 100dvh;
 }
 
 #page {

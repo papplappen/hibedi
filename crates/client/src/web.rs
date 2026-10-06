@@ -1,55 +1,42 @@
 //! The web page around the wasm game (web/game.js). The page runs the
-//! rooms; the game only exchanges JSON messages with it:
+//! rooms; the game only asks it for our seat, game states other players
+//! published and whether everyone is connected, and hands it the game
+//! states we publish. States cross as JSON text.
 //!
-//! - in: our seat (once, before `main`), game states other players
-//!   published, and whether every player is connected,
-//! - out: the game states we publish.
-//!
-//! The page delivers a message by writing it into the buffer from
-//! [`hibedi_alloc`] and calling [`hibedi_receive`].
+//! The page keeps what the room sends until we ask, so a game already
+//! in progress is there when the game starts.
 
-use std::cell::RefCell;
-
-use serde::Deserialize;
+use bevy::log::warn;
 use serde_json::Value;
+use wasm_bindgen::prelude::*;
 
 use crate::session::Session;
 
-unsafe extern "C" {
-    /// Hands the page a game state we publish (JSON bytes, valid only
-    /// for the duration of the call).
-    fn hibedi_send(ptr: *const u8, len: u32);
-    /// Fills `ptr[0..len]` with random bytes (crypto.getRandomValues).
-    fn hibedi_random(ptr: *mut u8, len: u32);
-}
+#[wasm_bindgen]
+extern "C" {
+    /// Our seat in the page's room; `null` for a local game.
+    #[wasm_bindgen(js_namespace = hibedi, js_name = seat)]
+    fn page_seat() -> Option<u32>;
 
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum Message {
-    Seat { seat: usize },
-    State { state: Value },
-    Presence { online: bool },
-}
+    /// The latest game state another player published, if one arrived
+    /// since the last call.
+    #[wasm_bindgen(js_namespace = hibedi, js_name = takeState)]
+    fn page_take_state() -> Option<String>;
 
-/// What the page told us. Every message is a complete snapshot, so only
-/// the latest of each kind matters.
-#[derive(Default)]
-struct Inbox {
-    seat: Option<usize>,
-    state: Option<Value>,
-    online: bool,
-}
+    /// Whether every seat's player is connected.
+    #[wasm_bindgen(js_namespace = hibedi, js_name = online)]
+    fn page_online() -> bool;
 
-thread_local! {
-    static INBOX: RefCell<Inbox> = RefCell::default();
-    static BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// Hands the page a game state we publish.
+    #[wasm_bindgen(js_namespace = hibedi, js_name = publish)]
+    fn page_publish(state: &str);
 }
 
 /// Our seat in the page's room; `None` when the page runs a local game.
 pub fn session() -> Option<WebSession> {
-    INBOX
-        .with_borrow(|inbox| inbox.seat)
-        .map(|seat| WebSession { seat })
+    page_seat().map(|seat| WebSession {
+        seat: seat as usize,
+    })
 }
 
 pub struct WebSession {
@@ -62,56 +49,17 @@ impl Session for WebSession {
     }
 
     fn receive(&mut self) -> Option<Value> {
-        INBOX.with_borrow_mut(|inbox| inbox.state.take())
+        let state = page_take_state()?;
+        serde_json::from_str(&state)
+            .inspect_err(|error| warn!("ignoring a malformed game state from the page: {error}"))
+            .ok()
     }
 
     fn publish(&mut self, state: Value) {
-        let json = serde_json::to_vec(&state).expect("game states always serialize");
-        unsafe { hibedi_send(json.as_ptr(), json.len() as u32) };
+        page_publish(&state.to_string());
     }
 
     fn everyone_online(&self) -> bool {
-        INBOX.with_borrow(|inbox| inbox.online)
+        page_online()
     }
-}
-
-/// Space for the next message, `len` bytes.
-#[unsafe(no_mangle)]
-pub extern "C" fn hibedi_alloc(len: u32) -> *mut u8 {
-    BUFFER.with_borrow_mut(|buffer| {
-        buffer.clear();
-        buffer.resize(len as usize, 0);
-        buffer.as_mut_ptr()
-    })
-}
-
-/// Reads the message the page wrote into the buffer.
-#[unsafe(no_mangle)]
-pub extern "C" fn hibedi_receive(len: u32) {
-    let message = BUFFER.with_borrow(|buffer| serde_json::from_slice(&buffer[..len as usize]));
-    INBOX.with_borrow_mut(|inbox| match message {
-        Ok(Message::Seat { seat }) => inbox.seat = Some(seat),
-        Ok(Message::State { state }) => inbox.state = Some(state),
-        Ok(Message::Presence { online }) => inbox.online = online,
-        Err(error) => eprintln!("ignoring malformed page message: {error}"),
-    });
-}
-
-/// Plugin version the miniquad loader checks against the page's plugin
-/// registration (web/game.js).
-#[unsafe(no_mangle)]
-pub extern "C" fn hibedi_crate_version() -> u32 {
-    1
-}
-
-/// getrandom's custom wasm backend (selected in .cargo/config.toml):
-/// entropy comes from the page, which keeps wasm-bindgen out of the
-/// build (the miniquad loader cannot provide its imports).
-#[unsafe(no_mangle)]
-pub extern "Rust" fn __getrandom_v03_custom(
-    dest: *mut u8,
-    len: usize,
-) -> Result<(), getrandom::Error> {
-    unsafe { hibedi_random(dest, len as u32) };
-    Ok(())
 }
