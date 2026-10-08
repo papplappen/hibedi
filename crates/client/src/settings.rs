@@ -74,9 +74,7 @@ impl Settings {
                     .ok()
             })
             .unwrap_or_default();
-        if !BoardSize::ALL.contains(&settings.board) {
-            settings.board = BoardSize::DEFAULT;
-        }
+        settings.board = settings.board.clamped();
         settings
     }
 }
@@ -98,20 +96,22 @@ pub struct BoardSize {
 }
 
 impl BoardSize {
-    pub const DEFAULT: Self = Self::new(BOARD_WIDTH, BOARD_HEIGHT);
+    pub const DEFAULT: Self = Self {
+        width: BOARD_WIDTH,
+        height: BOARD_HEIGHT,
+    };
 
-    /// The sizes on offer: the default, and up to two cells smaller or
-    /// larger each way.
-    pub const ALL: [Self; 5] = [
-        Self::new(BOARD_WIDTH - 2, BOARD_HEIGHT - 2),
-        Self::new(BOARD_WIDTH - 1, BOARD_HEIGHT - 1),
-        Self::DEFAULT,
-        Self::new(BOARD_WIDTH + 1, BOARD_HEIGHT + 1),
-        Self::new(BOARD_WIDTH + 2, BOARD_HEIGHT + 2),
-    ];
+    /// Playable cells each way, at least and at most.
+    pub const MIN: usize = 2;
+    pub const MAX: usize = 8;
 
-    const fn new(width: usize, height: usize) -> Self {
-        Self { width, height }
+    /// The size, each way within [`Self::MIN`] and [`Self::MAX`].
+    pub fn clamped(self) -> Self {
+        let clamp = |cells: usize| cells.clamp(Self::MIN, Self::MAX);
+        Self {
+            width: clamp(self.width),
+            height: clamp(self.height),
+        }
     }
 }
 
@@ -218,7 +218,7 @@ mod command_line {
     use std::sync::LazyLock;
 
     use clap::ValueEnum;
-    use clap::builder::PossibleValue;
+    use clap::builder::{PossibleValue, TypedValueParser};
 
     use super::*;
 
@@ -231,9 +231,12 @@ mod command_line {
         /// The side you take against a bot
         #[arg(long)]
         side: Option<Side>,
-        /// The boards dealt
-        #[arg(long)]
-        size: Option<BoardSize>,
+        /// Playable cells across the boards dealt
+        #[arg(long, value_parser = cells())]
+        width: Option<usize>,
+        /// Playable cells down the boards dealt
+        #[arg(long, value_parser = cells())]
+        height: Option<usize>,
         /// The board's look
         #[arg(long)]
         theme: Option<ThemeKind>,
@@ -253,8 +256,11 @@ mod command_line {
             if let Some(side) = self.side {
                 settings.side = side;
             }
-            if let Some(size) = self.size {
-                settings.board = size;
+            if let Some(width) = self.width {
+                settings.board.width = width;
+            }
+            if let Some(height) = self.height {
+                settings.board.height = height;
             }
             if let Some(theme) = self.theme {
                 settings.theme = theme;
@@ -300,18 +306,11 @@ mod command_line {
         }
     }
 
-    /// `<width>x<height>`.
-    impl ValueEnum for BoardSize {
-        fn value_variants<'a>() -> &'a [Self] {
-            &Self::ALL
-        }
-
-        fn to_possible_value(&self) -> Option<PossibleValue> {
-            Some(PossibleValue::new(format!(
-                "{}x{}",
-                self.width, self.height
-            )))
-        }
+    /// A count of playable cells, within the sizes on offer.
+    fn cells() -> impl TypedValueParser<Value = usize> {
+        clap::value_parser!(u8)
+            .range(BoardSize::MIN as i64..=BoardSize::MAX as i64)
+            .map(usize::from)
     }
 }
 
@@ -339,14 +338,21 @@ mod tests {
         let settings = apply(&[
             "--opponent=greedy",
             "--side=green",
-            "--size=6x7",
+            "--width=8",
+            "--height=3",
             "--theme=cards",
             "--animations=hops,fades",
         ])
         .unwrap();
         assert_eq!(settings.opponent, Opponent::Bot(BotKind::Greedy));
         assert_eq!(settings.side, Side::Green);
-        assert_eq!(settings.board, BoardSize::ALL[4]);
+        assert_eq!(
+            settings.board,
+            BoardSize {
+                width: 8,
+                height: 3
+            }
+        );
         assert_eq!(settings.theme, ThemeKind::Cards);
         assert_eq!(
             Animation::ALL.map(|animation| settings.motion.plays(animation)),
@@ -364,7 +370,8 @@ mod tests {
 
     #[test]
     fn unknown_values_are_refused() {
-        assert!(apply(&["--size=9x9"]).is_err());
+        assert!(apply(&["--width=9"]).is_err());
+        assert!(apply(&["--height=1"]).is_err());
         assert!(apply(&["--animations=hops,spins"]).is_err());
         assert!(apply(&["--opponent=nobody"]).is_err());
         assert!(apply(&["--animations=hops", "--no-animations"]).is_err());

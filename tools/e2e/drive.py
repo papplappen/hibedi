@@ -5,6 +5,7 @@ Commands, run in order (coordinates in window pixels):
   click:X:Y             left click
   rclick:X:Y            right click
   drag:X1:Y1:X2:Y2      right-drag (sketches a line)
+  ldrag:X1:Y1:X2:Y2     left-drag (moves a slider)
   key:NAME              press a key (X keysym name: 1, q, Escape, F2, Return)
   sleep:SECONDS
   shot:FILE             screenshot of the window, as PNG
@@ -74,13 +75,14 @@ for command in sys.argv[1:]:
         number = 1 if op == 'click' else 3
         button(number, True)
         button(number, False)
-    elif op == 'drag':
+    elif op in ('drag', 'ldrag'):
         x1, y1, x2, y2 = map(int, args)
+        number = 3 if op == 'drag' else 1
         at(x1, y1)
-        button(3, True)
+        button(number, True)
         for i in range(1, 9):
             at(x1 + (x2 - x1) * i // 8, y1 + (y2 - y1) * i // 8)
-        button(3, False)
+        button(number, False)
     elif op == 'key':
         win.set_input_focus(X.RevertToParent, X.CurrentTime)
         code = d.keysym_to_keycode(XK.string_to_keysym(args[0]))

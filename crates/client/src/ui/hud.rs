@@ -11,7 +11,9 @@ use super::anim::{Animate, ScaleTo};
 use super::layout::{Content, HeaderEnd, Sidebar, WIDE_CARD_W};
 use super::tap::Tap;
 use super::theme::{Fonts, TextStyle, palette, side_color};
-use super::widgets::{self, ButtonColors, ButtonLabel, ShownIf, spawn_choice, spawn_option};
+use super::widgets::{
+    self, ButtonColors, ButtonLabel, ShownIf, spawn_choice, spawn_group, spawn_option, spawn_slider,
+};
 use super::{Overlay, Screen};
 use crate::play::{Match, Player};
 use crate::settings::{BoardSize, Opponent, Settings};
@@ -642,17 +644,26 @@ fn spawn_next_game(commands: &mut Commands, fonts: &Fonts, sidebar: Entity, onli
             ));
         }
     }
-    let (_, sizes) = spawn_choice(commands, fonts, card, "Board size");
-    for size in BoardSize::ALL {
-        spawn_option(
-            commands,
-            fonts,
-            sizes,
-            &format!("{}×{}", size.width, size.height),
-            move |settings| settings.board == size,
-            move |settings| settings.board = size,
-        );
-    }
+    let sizes = spawn_group(commands, fonts, card, "Board size");
+    let cells = BoardSize::MIN..=BoardSize::MAX;
+    spawn_slider(
+        commands,
+        fonts,
+        sizes,
+        "Width",
+        cells.clone(),
+        |settings| settings.board.width,
+        |settings, cells| settings.board.width = cells,
+    );
+    spawn_slider(
+        commands,
+        fonts,
+        sizes,
+        "Height",
+        cells,
+        |settings| settings.board.height,
+        |settings, cells| settings.board.height = cells,
+    );
     spawn_new_game_button(commands, fonts, card);
 }
 

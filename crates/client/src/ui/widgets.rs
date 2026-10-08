@@ -1,10 +1,11 @@
 //! The few widgets the screen needs, built on [`super::tap`]: buttons,
-//! and controls bound to a setting.
+//! and controls bound to a setting: options, switches and sliders.
 //!
 //! Bevy's own widgets (`bevy_ui_widgets`) are not used: they act on
 //! picking events, which lose quick taps (see [`super::tap`]).
 
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 
 use super::anim::{Animate, ColorTo};
 use super::tap::{Tap, Tappable};
@@ -16,10 +17,12 @@ pub fn plugin(app: &mut App) {
         Update,
         (
             hover_buttons,
+            drag_sliders,
             show_controls.run_if(
                 resource_changed::<Settings>
                     .or_eager(any_match_filter::<Added<Control>>)
-                    .or_eager(any_match_filter::<Added<ShownIf>>),
+                    .or_eager(any_match_filter::<Added<ShownIf>>)
+                    .or_eager(any_match_filter::<Added<Slider>>),
             ),
         )
             .before(Animate),
@@ -122,16 +125,9 @@ fn tap_control(tap: On<Tap>, controls: Query<&Control>, mut settings: ResMut<Set
     }
 }
 
-/// A labeled choice: the label above, then the options (wrapping onto
-/// further lines as needed). Returns the choice and the options'
-/// container, for [`spawn_option`]s.
-pub fn spawn_choice(
-    commands: &mut Commands,
-    fonts: &Fonts,
-    parent: Entity,
-    label: &str,
-) -> (Entity, Entity) {
-    let choice = commands
+/// A labeled group of controls, one under the other.
+pub fn spawn_group(commands: &mut Commands, fonts: &Fonts, parent: Entity, label: &str) -> Entity {
+    let group = commands
         .spawn((
             Node {
                 flex_direction: FlexDirection::Column,
@@ -141,13 +137,24 @@ pub fn spawn_choice(
             ChildOf(parent),
         ))
         .id();
-    commands.spawn((fonts.text(label, CHOICE_LABEL), ChildOf(choice)));
+    commands.spawn((fonts.text(label, CHOICE_LABEL), ChildOf(group)));
+    group
+}
+
+/// A labeled choice: the label above, then the options side by side.
+/// Returns the choice and the options' container, for
+/// [`spawn_option`]s.
+pub fn spawn_choice(
+    commands: &mut Commands,
+    fonts: &Fonts,
+    parent: Entity,
+    label: &str,
+) -> (Entity, Entity) {
+    let choice = spawn_group(commands, fonts, parent, label);
     let options = commands
         .spawn((
             Node {
-                flex_wrap: FlexWrap::Wrap,
                 column_gap: px(6),
-                row_gap: px(6),
                 ..default()
             },
             ChildOf(choice),
@@ -172,8 +179,9 @@ pub fn spawn_option(
             Tappable,
             Node {
                 height: px(OPTION_H),
-                // Options share their row evenly.
+                // Options share their row evenly, whatever their labels.
                 flex_grow: 1.0,
+                flex_basis: px(0),
                 padding: UiRect::horizontal(px(8)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
@@ -241,6 +249,178 @@ pub fn spawn_switch(
     switch
 }
 
+/// A slider for a whole number in a setting, from `min` to `max`:
+/// pressing on its track or dragging along it sets the number under the
+/// pointer.
+#[derive(Component)]
+pub struct Slider {
+    min: usize,
+    max: usize,
+    get: Box<dyn Fn(&Settings) -> usize + Send + Sync>,
+    set: Box<dyn Fn(&mut Settings, usize) + Send + Sync>,
+    /// The rail the values lie along, its filled part, the knob, and the
+    /// number shown.
+    rail: Entity,
+    fill: Entity,
+    knob: Entity,
+    value: Entity,
+}
+
+const SLIDER_H: f32 = 30.0;
+const RAIL: f32 = 4.0;
+const SLIDER_LABEL_W: f32 = 56.0;
+
+/// A labeled slider for the number `get` reads and `set` writes.
+pub fn spawn_slider(
+    commands: &mut Commands,
+    fonts: &Fonts,
+    parent: Entity,
+    label: &str,
+    range: std::ops::RangeInclusive<usize>,
+    get: impl Fn(&Settings) -> usize + Send + Sync + 'static,
+    set: impl Fn(&mut Settings, usize) + Send + Sync + 'static,
+) -> Entity {
+    let line = commands
+        .spawn((
+            Node {
+                align_items: AlignItems::Center,
+                column_gap: px(10),
+                ..default()
+            },
+            ChildOf(parent),
+        ))
+        .id();
+    commands.spawn((
+        fonts.text(label, OPTION),
+        Node {
+            width: px(SLIDER_LABEL_W),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        ChildOf(line),
+    ));
+    // The whole height takes presses; the knob's half width on each end
+    // keeps it inside at the extremes.
+    let track = commands
+        .spawn((
+            Node {
+                flex_grow: 1.0,
+                height: px(SLIDER_H),
+                padding: UiRect::horizontal(px(KNOB / 2.0)),
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            ChildOf(line),
+        ))
+        .id();
+    let rail = commands
+        .spawn((
+            Node {
+                width: percent(100),
+                height: px(RAIL),
+                border_radius: BorderRadius::MAX,
+                ..default()
+            },
+            BackgroundColor(palette::RAISED),
+            ChildOf(track),
+        ))
+        .id();
+    let fill = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                height: percent(100),
+                border_radius: BorderRadius::MAX,
+                ..default()
+            },
+            BackgroundColor(palette::GOLD),
+            ChildOf(rail),
+        ))
+        .id();
+    let knob = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: px(KNOB),
+                height: px(KNOB),
+                top: px((RAIL - KNOB) / 2.0),
+                margin: UiRect::left(px(-KNOB / 2.0)),
+                border_radius: BorderRadius::MAX,
+                ..default()
+            },
+            BackgroundColor(palette::TEXT),
+            ChildOf(rail),
+        ))
+        .id();
+    let value = commands
+        .spawn((
+            fonts.text("", OPTION),
+            Node {
+                width: px(16),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            ChildOf(line),
+        ))
+        .id();
+    commands.entity(track).insert(Slider {
+        min: *range.start(),
+        max: *range.end(),
+        get: Box::new(get),
+        set: Box::new(set),
+        rail,
+        fill,
+        knob,
+        value,
+    });
+    line
+}
+
+/// Follows a press on a slider's track while it lasts: the mouse's left
+/// button, or a finger.
+fn drag_sliders(
+    mouse: Res<ButtonInput<MouseButton>>,
+    touches: Res<Touches>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    sliders: Query<(Entity, &Slider, &ComputedNode, &UiGlobalTransform)>,
+    nodes: Query<(&ComputedNode, &UiGlobalTransform)>,
+    mut settings: ResMut<Settings>,
+    mut held: Local<Option<Entity>>,
+) {
+    // UI nodes are laid out in physical pixels.
+    let finger = touches.iter().next();
+    let pointer = match finger {
+        Some(touch) => Some(touch.position() * window.scale_factor()),
+        None if mouse.pressed(MouseButton::Left) => window.physical_cursor_position(),
+        None => None,
+    };
+    let Some(pointer) = pointer else {
+        *held = None;
+        return;
+    };
+    let pressed = mouse.just_pressed(MouseButton::Left) || touches.any_just_pressed();
+    if pressed {
+        *held = sliders
+            .iter()
+            .find(|(_, _, node, transform)| node.contains_point(**transform, pointer))
+            .map(|(entity, ..)| entity);
+    }
+    let Some((_, slider, ..)) = held.and_then(|entity| sliders.get(entity).ok()) else {
+        return;
+    };
+    let Ok((rail, transform)) = nodes.get(slider.rail) else {
+        return;
+    };
+    let Some(at) = rail.normalize_point(*transform, pointer) else {
+        return;
+    };
+    let t = (at.x + 0.5).clamp(0.0, 1.0);
+    let value = slider.min + (t * (slider.max - slider.min) as f32).round() as usize;
+    let mut changed = settings.clone();
+    (slider.set)(&mut changed, value);
+    settings.set_if_neq(changed);
+}
+
 /// Shows every control, and the nodes shown only for some settings, as
 /// the settings stand.
 fn show_controls(
@@ -248,7 +428,27 @@ fn show_controls(
     settings: Res<Settings>,
     controls: Query<(Entity, &Control)>,
     mut shown: Query<(&ShownIf, &mut Node), Without<Control>>,
+    sliders: Query<&Slider>,
 ) {
+    for slider in &sliders {
+        let value = (slider.get)(&settings);
+        let t = (value - slider.min) as f32 / (slider.max - slider.min) as f32;
+        commands
+            .entity(slider.fill)
+            .entry::<Node>()
+            .and_modify(move |mut node| {
+                node.width = percent(100.0 * t);
+            });
+        commands
+            .entity(slider.knob)
+            .entry::<Node>()
+            .and_modify(move |mut node| {
+                node.left = percent(100.0 * t);
+            });
+        commands
+            .entity(slider.value)
+            .insert(Text::new(value.to_string()));
+    }
     for (ShownIf(condition), mut node) in &mut shown {
         let display = if condition(&settings) {
             Display::Flex
