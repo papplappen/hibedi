@@ -34,8 +34,10 @@ pub fn plugin(app: &mut App) {
                     .or_eager(resource_changed::<Sketch>)
                     .or_eager(resource_changed::<Theme>),
             ),
-            show_sketch.run_if(resource_changed::<Sketch>),
-            size_keys,
+            follow_grid,
+            show_sketch.run_if(
+                resource_changed::<Sketch>.or_eager(any_match_filter::<Changed<BoardGrid>>),
+            ),
         )
             .run_if(in_state(Screen::Playing))
             .before(Animate),
@@ -57,41 +59,95 @@ const SYMBOL_SIZE: f32 = 80.0;
 const SKETCH_LINE: f32 = 0.18;
 const SKETCH_DOT: f32 = 0.4;
 
-/// The board's frame; the layout sizes it.
+/// The board's frame around the grid; the layout sizes it, and the grid
+/// in it.
 #[derive(Component)]
 pub struct BoardFrame;
 
-/// The grid of cells inside the frame; tokens are positioned on it in
-/// percent of its size.
-#[derive(Component, PartialEq)]
-struct BoardGrid {
+/// The grid of cells inside the frame, and where everything on it goes.
+/// The layout sizes the cells and the gaps between them in whole
+/// physical pixels ([`BoardGrid::fit`]), so every gap comes out the same;
+/// cells, tokens and sketches are all placed from them, in logical
+/// pixels.
+#[derive(Component)]
+pub struct BoardGrid {
     columns: usize,
     rows: usize,
+    /// A cell's side, and the gap between neighbors.
+    cell: f32,
+    gap: f32,
 }
 
 impl BoardGrid {
-    /// The grid a game's board needs: its cells, outer ring included.
+    /// The grid a game's board needs: its cells, outer ring included;
+    /// sized once the layout fits it.
     fn of(game: &Game) -> Self {
         Self {
             columns: game.board().storage_width(),
             rows: game.board().storage_height(),
+            cell: 0.0,
+            gap: 0.0,
         }
     }
 
-    /// The `left`/`top` of a cell, in percent of the grid.
+    /// Whether the grid has the cells of `game`'s board.
+    fn holds(&self, game: &Game) -> bool {
+        (self.columns, self.rows) == (game.board().storage_width(), game.board().storage_height())
+    }
+
+    pub const fn columns(&self) -> usize {
+        self.columns
+    }
+
+    pub const fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Sizes the cells and gaps (in logical pixels); the grid then spans
+    /// [`BoardGrid::size`]. Returns whether anything changed.
+    pub fn fit(&mut self, cell: f32, gap: f32) -> bool {
+        let changed = (self.cell, self.gap) != (cell, gap);
+        (self.cell, self.gap) = (cell, gap);
+        changed
+    }
+
+    /// The grid's size: its cells and the gaps between them.
+    pub fn size(&self) -> Vec2 {
+        let span = |count: usize| count as f32 * self.pitch() - self.gap;
+        vec2(span(self.columns), span(self.rows))
+    }
+
+    /// From a cell to the next.
+    fn pitch(&self) -> f32 {
+        self.cell + self.gap
+    }
+
+    /// The top left of a cell.
     fn position(&self, coord: Coord) -> Vec2 {
-        vec2(
-            coord.x as f32 * 100.0 / self.columns as f32,
-            coord.y as f32 * 100.0 / self.rows as f32,
+        vec2(coord.x as f32, coord.y as f32) * self.pitch()
+    }
+
+    /// The cell under a point of the grid, if any (gaps count to the
+    /// cell before them).
+    fn cell_at(&self, point: Vec2) -> Option<Coord> {
+        let inside = point.cmpge(Vec2::ZERO).all() && point.cmplt(self.size()).all();
+        inside.then(|| self.nearest_cell(point))
+    }
+
+    /// The cell nearest a point, on the grid or beyond it.
+    fn nearest_cell(&self, point: Vec2) -> Coord {
+        let cell = (point / self.pitch()).floor();
+        Coord::new(
+            (cell.x as i32).clamp(0, self.columns as i32 - 1),
+            (cell.y as i32).clamp(0, self.rows as i32 - 1),
         )
     }
 
     /// A band `thickness` cells thick (and long beyond the centers)
-    /// joining the centers of two cells, in percent of the grid.
+    /// joining the centers of two cells.
     fn span(&self, from: Coord, to: Coord, thickness: f32) -> Rect {
-        let cell = vec2(100.0 / self.columns as f32, 100.0 / self.rows as f32);
-        let center = |coord: Coord| (vec2(coord.x as f32, coord.y as f32) + 0.5) * cell;
-        let half = thickness / 2.0 * cell;
+        let center = |coord: Coord| self.position(coord) + self.cell / 2.0;
+        let half = Vec2::splat(thickness * self.cell / 2.0);
         Rect::from_corners(center(from) - half, center(to) + half)
     }
 }
@@ -155,7 +211,8 @@ pub fn spawn(
 
 /// Builds the grid of the match's game in the frame, growing in with a
 /// wave: the board's structure (its cells) follows the game's
-/// dimensions; everything else follows changes ([`follow_match`]).
+/// dimensions; everything else follows changes ([`follow_match`]), and
+/// the grid's size the layout ([`follow_grid`]).
 fn build_grid(commands: &mut Commands, fonts: &Fonts, theme: &Theme, frame: Entity, play: &Match) {
     let game = play.game().expect("a game is being played");
     let view = BoardView::of(game, viewer(play));
@@ -163,11 +220,7 @@ fn build_grid(commands: &mut Commands, fonts: &Fonts, theme: &Theme, frame: Enti
     let grid_entity = commands
         .spawn((
             Node {
-                width: percent(100),
-                height: percent(100),
                 display: Display::Grid,
-                grid_template_columns: RepeatedGridTrack::flex(grid.columns as u16, 1.0),
-                grid_template_rows: RepeatedGridTrack::flex(grid.rows as u16, 1.0),
                 ..default()
             },
             ChildOf(frame),
@@ -213,7 +266,6 @@ fn spawn_cell(
                 shown: view.cell,
             },
             Node {
-                margin: UiRect::all(px(1)),
                 border_radius: BorderRadius::all(percent(8)),
                 ..default()
             },
@@ -312,20 +364,37 @@ fn show_cell(commands: &mut Commands, theme: &Theme, parts: &CellParts, view: &C
 #[derive(Component)]
 struct KeyLabel;
 
-/// Keeps the key labels in proportion to the cells, which grow and
-/// shrink with the window.
-fn size_keys(
-    grid: Single<(&BoardGrid, &ComputedNode)>,
+/// Lays the grid out as the layout sized it: its tracks, the tokens on
+/// it (a token hopping lands at once), and the key labels, in proportion
+/// to the cells.
+fn follow_grid(
+    mut commands: Commands,
+    grid: Single<(&BoardGrid, &mut Node), Changed<BoardGrid>>,
+    mut tokens: Query<(Entity, &BoardToken, &mut Node), Without<BoardGrid>>,
     mut labels: Query<&mut TextFont, With<KeyLabel>>,
 ) {
-    let (grid, node) = *grid;
-    let cell = node.size().x * node.inverse_scale_factor() / grid.columns as f32;
-    let size = FontSize::Px((KEY_SIZE * cell).round().max(9.0));
-    for mut font in &mut labels {
-        if font.font_size != size {
-            font.font_size = size;
-        }
+    let (grid, mut node) = grid.into_inner();
+    node.grid_template_columns = RepeatedGridTrack::px(grid.columns as u16, grid.cell);
+    node.grid_template_rows = RepeatedGridTrack::px(grid.rows as u16, grid.cell);
+    node.column_gap = px(grid.gap);
+    node.row_gap = px(grid.gap);
+    for (entity, token, mut node) in &mut tokens {
+        commands.entity(entity).remove::<Hop>();
+        place(&mut node, grid, token.view.position);
     }
+    let size = FontSize::Px((KEY_SIZE * grid.cell).round().max(9.0));
+    for mut font in &mut labels {
+        font.font_size = size;
+    }
+}
+
+/// Puts a token's node on a cell.
+fn place(node: &mut Node, grid: &BoardGrid, coord: Coord) {
+    let at = grid.position(coord);
+    node.left = px(at.x);
+    node.top = px(at.y);
+    node.width = px(grid.cell);
+    node.height = px(grid.cell);
 }
 
 fn spawn_token(
@@ -336,18 +405,15 @@ fn spawn_token(
     view: &TokenView,
     delay: f32,
 ) {
-    let at = grid.position(view.position);
+    let mut node = Node {
+        position_type: PositionType::Absolute,
+        ..default()
+    };
+    place(&mut node, grid, view.position);
     let token = commands
         .spawn((
             BoardToken { view: *view },
-            Node {
-                position_type: PositionType::Absolute,
-                left: percent(at.x),
-                top: percent(at.y),
-                width: percent(100.0 / grid.columns as f32),
-                height: percent(100.0 / grid.rows as f32),
-                ..default()
-            },
+            node,
             ScaleTo::appear(delay),
             ChildOf(grid_entity),
         ))
@@ -435,7 +501,7 @@ fn follow_match(
         return;
     };
     let (grid_entity, grid) = *grid;
-    if *grid != BoardGrid::of(game) {
+    if !grid.holds(game) {
         commands.entity(grid_entity).despawn();
         build_grid(&mut commands, &fonts, &theme, *frame, &play);
         *shown = Shown {
@@ -633,13 +699,13 @@ fn distance(a: Coord, b: Coord) -> f32 {
     vec2(a.x as f32, a.y as f32).distance(vec2(b.x as f32, b.y as f32))
 }
 
-/// A token node's `left`/`top`, in percent.
+/// A token node's `left`/`top`, in logical pixels.
 fn position_of(node: &Node) -> Vec2 {
-    let percent = |val: Val| match val {
-        Val::Percent(value) => value,
+    let px = |val: Val| match val {
+        Val::Px(value) => value,
         _ => 0.0,
     };
-    vec2(percent(node.left), percent(node.top))
+    vec2(px(node.left), px(node.top))
 }
 
 fn visible_if(visible: bool) -> Visibility {
@@ -691,10 +757,10 @@ fn show_sketch(
                 SketchMark,
                 Node {
                     position_type: PositionType::Absolute,
-                    left: percent(rect.min.x),
-                    top: percent(rect.min.y),
-                    width: percent(rect.width()),
-                    height: percent(rect.height()),
+                    left: px(rect.min.x),
+                    top: px(rect.min.y),
+                    width: px(rect.width()),
+                    height: px(rect.height()),
                     border_radius: BorderRadius::MAX,
                     ..default()
                 },

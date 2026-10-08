@@ -15,7 +15,8 @@
 #   tools/e2e/e2e.sh start --game /tmp/g.txt
 #   tools/e2e/e2e.sh do key:1 sleep:1 shot:/tmp/after.png
 #
-# Settings are client args too (--theme cards, --animations none, ...;
+# E2E_SCALE=1.25 runs the client at that scale factor (as on a scaled
+# display). Settings are client args too (--theme cards, --animations none, ...;
 # see hibedi-client --help); the rest start at their defaults. The
 # client's config, home (downloads land in its Downloads) and log live
 # in $E2E_DIR (default target/e2e).
@@ -32,12 +33,15 @@ start)
     "$0" stop
     rm -rf "$dir"
     mkdir -p "$dir/config" "$dir/home/Downloads"
-    Xvfb "$display" -screen 0 1400x900x24 >/dev/null 2>&1 &
+    Xvfb "$display" -screen 0 1920x1200x24 >/dev/null 2>&1 &
+    echo $! > "$dir/xvfb.pid"
     "$0" do  # until the display takes clients
     # Vulkan on Xvfb presents only through the software WSI.
     DISPLAY=$display WAYLAND_DISPLAY= MESA_VK_WSI_DEBUG=sw \
+        WINIT_X11_SCALE_FACTOR=${E2E_SCALE:-1} \
         XDG_CONFIG_HOME="$dir/config" HOME="$dir/home" \
         target/debug/hibedi-client "$@" > "$dir/client.log" 2>&1 &
+    echo $! > "$dir/client.pid"
     "$0" do wait
     ;;
 do)
@@ -45,10 +49,16 @@ do)
     E2E_DISPLAY=$display uv run -q --with python-xlib python tools/e2e/drive.py "$@"
     ;;
 stop)
-    pkill -x hibedi-client || true
-    pkill -f "Xvfb $display" || true
-    # Until the display is free again.
-    while pgrep -f "Xvfb $display" >/dev/null; do sleep 0.1; done
+    # Only what start started: never other instances of the game.
+    for name in client xvfb; do
+        file="$dir/$name.pid"
+        [ -f "$file" ] || continue
+        pid=$(cat "$file")
+        kill "$pid" 2>/dev/null || true
+        # Until it is gone (the display is free again).
+        while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
+        rm -f "$file"
+    done
     ;;
 *)
     sed -n '2,25p' "$0"

@@ -10,9 +10,8 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use super::Screen;
-use super::board::{self, BoardFrame};
+use super::board::{self, BoardFrame, BoardGrid};
 use super::theme::{Fonts, TextStyle, palette};
-use crate::play::Match;
 
 pub fn plugin(app: &mut App) {
     app.add_systems(
@@ -35,6 +34,8 @@ const SIDEBAR_W: f32 = 280.0;
 pub const WIDE_CARD_W: f32 = 460.0;
 /// Below this cell size the board is not worth laying out larger.
 const MIN_CELL: f32 = 12.0;
+/// Between neighboring cells.
+const CELL_GAP: f32 = 2.0;
 
 const TITLE: TextStyle = TextStyle::bold(26.0, palette::TEXT);
 const COMPACT_TITLE: f32 = 20.0;
@@ -166,33 +167,35 @@ fn adapt_to_window(
     }
 }
 
-/// Sizes the board to whole-pixel cells as large as fit, beside or
-/// above the sidebar, whichever allows larger ones.
+/// Sizes the board as large as fits, beside or above the sidebar,
+/// whichever allows larger cells. Cells, the gaps between them and the
+/// frame around them are whole physical pixels (UI layout rounds to
+/// those), so every gap on the board is the same.
 fn fit_board(
-    play: Res<Match>,
     content: Single<(&ComputedNode, &mut Node), With<Content>>,
     sidebar: Single<(&ComputedNode, &mut Node), (With<Sidebar>, Without<Content>)>,
     mut frame: Single<&mut Node, (With<BoardFrame>, Without<Content>, Without<Sidebar>)>,
+    mut grid: Single<&mut BoardGrid>,
 ) {
-    let Some(game) = play.game() else {
-        return;
-    };
-    let columns = game.board().storage_width() as f32;
-    let rows = game.board().storage_height() as f32;
     let (content_size, mut content) = content.into_inner();
     let (sidebar_size, mut sidebar) = sidebar.into_inner();
-    let available = content_size.size() * content_size.inverse_scale_factor();
-    let sidebar_h = sidebar_size.size().y * sidebar_size.inverse_scale_factor();
+    let scale = content_size.inverse_scale_factor().recip();
+    let (columns, rows) = (grid.columns() as f32, grid.rows() as f32);
 
-    let frame_w = 2.0 * board::FRAME;
+    // In physical pixels.
+    let pad = (board::FRAME * scale).round();
+    let gap = (CELL_GAP * scale).round().max(1.0);
+    let available = content_size.size();
+    let sidebar_h = sidebar_size.size().y;
     let cell_for = |width: f32, height: f32| {
-        ((width - frame_w) / columns)
-            .min((height - frame_w) / rows)
+        let fit = |space: f32, count: f32| (space - 2.0 * pad - (count - 1.0) * gap) / count;
+        fit(width, columns)
+            .min(fit(height, rows))
             .floor()
-            .max(MIN_CELL)
+            .max((MIN_CELL * scale).round())
     };
-    let beside = cell_for(available.x - GAP - SIDEBAR_W, available.y);
-    let stacked = cell_for(available.x, available.y - GAP - sidebar_h);
+    let beside = cell_for(available.x - (GAP + SIDEBAR_W) * scale, available.y);
+    let stacked = cell_for(available.x, available.y - GAP * scale - sidebar_h);
 
     let (direction, align, cell, sidebar_w) = if beside >= stacked {
         (
@@ -214,9 +217,17 @@ fn fit_board(
         content.align_items = align;
     });
     restyle(&mut sidebar, |sidebar| sidebar.width = sidebar_w);
+    if grid
+        .bypass_change_detection()
+        .fit(cell / scale, gap / scale)
+    {
+        grid.set_changed();
+    }
+    let size = grid.size() + 2.0 * pad / scale;
     restyle(&mut frame, |frame| {
-        frame.width = px(columns * cell + frame_w);
-        frame.height = px(rows * cell + frame_w);
+        frame.width = px(size.x);
+        frame.height = px(size.y);
+        frame.padding = UiRect::all(px(pad / scale));
     });
 }
 

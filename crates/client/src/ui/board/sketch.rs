@@ -73,38 +73,26 @@ fn draw(
         sketch.lines.clear();
     }
 
-    // Where the pointer is on the grid, from 0 to 1 each way. UI nodes
-    // are laid out in physical pixels; normalized, a node spans -0.5 to
-    // 0.5.
+    // Where the pointer is on the grid, in logical pixels. UI nodes are
+    // laid out in physical pixels; normalized, a node spans -0.5 to 0.5.
     let pointer = grid.and_then(|grid| {
         let (grid, node, transform) = *grid;
         let at = node.normalize_point(*transform, window.physical_cursor_position()?)? + 0.5;
-        Some((grid.columns, grid.rows, at))
+        Some((grid, at * grid.size()))
     });
-    let cell = |(columns, rows, at): (usize, usize, Vec2)| {
-        let column = (at.x * columns as f32).floor() as i32;
-        let row = (at.y * rows as f32).floor() as i32;
-        Coord::new(
-            column.clamp(0, columns as i32 - 1),
-            row.clamp(0, rows as i32 - 1),
-        )
-    };
 
     if mouse.just_pressed(MouseButton::Right)
-        && let Some(pointer @ (_, _, at)) = pointer
-        && at.cmpge(Vec2::ZERO).all()
-        && at.cmplt(Vec2::ONE).all()
+        && let Some(from) = pointer.and_then(|(grid, at)| grid.cell_at(at))
     {
-        let from = cell(pointer);
         sketch.drawing = Some(Line { from, to: from });
     }
 
     // The line follows the pointer along the row or the column, whichever
     // is closer.
     if let Some(drawing) = sketch.drawing
-        && let Some(pointer) = pointer
+        && let Some((grid, at)) = pointer
     {
-        let pointer = cell(pointer);
+        let pointer = grid.nearest_cell(at);
         let (dx, dy) = (pointer.x - drawing.from.x, pointer.y - drawing.from.y);
         let to = if dx.abs() >= dy.abs() {
             Coord::new(pointer.x, drawing.from.y)

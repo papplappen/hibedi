@@ -165,7 +165,7 @@ fn flip(
 }
 
 /// Jumps an absolutely positioned node from one `left`/`top` position
-/// (in percent) to another, growing as it lifts off the board.
+/// (in logical pixels) to another, growing as it lifts off the board.
 #[derive(Component)]
 pub struct Hop {
     clock: Clock,
@@ -200,8 +200,8 @@ fn hop(
         let at = hop
             .from
             .lerp(hop.to, EaseFunction::SineInOut.sample_clamped(t));
-        node.left = percent(at.x);
-        node.top = percent(at.y);
+        node.left = px(at.x);
+        node.top = px(at.y);
         transform.scale = Vec2::splat(1.0 + Hop::LIFT * arc(t));
         if t >= 1.0 {
             commands.entity(entity).remove::<Hop>();
