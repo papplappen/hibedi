@@ -5,7 +5,11 @@
 //! shown and the differences animate: tokens hop to where they moved,
 //! crossed cells flip as the hopping token passes over them, and a new
 //! deal flips the board over in a wave. Clicks on cells go to the match.
+//!
+//! On top of the game, the board shows the [`Sketch`] of moves being
+//! tried out: its lines, and the cells they flip.
 
+mod sketch;
 mod view;
 
 use bevy::prelude::*;
@@ -15,15 +19,20 @@ use super::Screen;
 use super::anim::{Animate, Bounce, ColorTo, Flip, Hop, Pulse, ScaleTo};
 use super::layout::Content;
 use super::tap::{Tap, Tappable};
-use super::theme::{palette, side_color};
+use super::theme::{Fonts, TextStyle, palette, side_color};
 use crate::play::Match;
-use view::{BoardView, CellView, Halo, Hint, TokenView};
+use sketch::{Line, Sketch};
+use view::{BoardView, CellView, Halo, Hint, TokenView, Viewer};
 
 pub fn plugin(app: &mut App) {
-    app.add_systems(
+    app.add_plugins(sketch::plugin).add_systems(
         Update,
-        follow_match
-            .run_if(in_state(Screen::Playing).and_then(resource_changed::<Match>))
+        (
+            follow_match.run_if(resource_changed::<Match>.or_eager(resource_changed::<Sketch>)),
+            show_sketch.run_if(resource_changed::<Sketch>),
+            size_keys,
+        )
+            .run_if(in_state(Screen::Playing))
             .before(Animate),
     );
 }
@@ -35,6 +44,11 @@ const WAVE_STEP: f32 = 0.035;
 /// A hop takes this long, plus [`HOP_PER_CELL`] for each cell it spans.
 const HOP_BASE: f32 = 0.16;
 const HOP_PER_CELL: f32 = 0.07;
+/// Key labels' size, in cells.
+const KEY_SIZE: f32 = 0.16;
+/// Sketched lines' thickness, and the dot at their end, in cells.
+const SKETCH_LINE: f32 = 0.18;
+const SKETCH_DOT: f32 = 0.4;
 
 /// The board's frame; the layout sizes it.
 #[derive(Component)]
@@ -56,6 +70,15 @@ impl BoardGrid {
             coord.y as f32 * 100.0 / self.rows as f32,
         )
     }
+
+    /// A band `thickness` cells thick (and long beyond the centers)
+    /// joining the centers of two cells, in percent of the grid.
+    fn span(&self, from: Coord, to: Coord, thickness: f32) -> Rect {
+        let cell = vec2(100.0 / self.columns as f32, 100.0 / self.rows as f32);
+        let center = |coord: Coord| (vec2(coord.x as f32, coord.y as f32) + 0.5) * cell;
+        let half = thickness / 2.0 * cell;
+        Rect::from_corners(center(from) - half, center(to) + half)
+    }
 }
 
 #[derive(Component)]
@@ -75,6 +98,8 @@ struct CellParts {
     /// The hint marker: a ring around a dot.
     ring: Entity,
     dot: Entity,
+    /// The label of the key taking the action aimed here.
+    key: Entity,
 }
 
 #[derive(Component)]
@@ -89,9 +114,14 @@ struct TokenParts {
 }
 
 /// Builds the board for the match's game, growing in with a wave.
-pub fn spawn(mut commands: Commands, play: Res<Match>, content: Single<Entity, With<Content>>) {
+pub fn spawn(
+    mut commands: Commands,
+    play: Res<Match>,
+    fonts: Res<Fonts>,
+    content: Single<Entity, With<Content>>,
+) {
     let game = play.game().expect("a game is being played");
-    let view = BoardView::of(game, play.shows_hints(), play.my_side());
+    let view = BoardView::of(game, viewer(&play));
     let grid = BoardGrid {
         columns: game.board().storage_width(),
         rows: game.board().storage_height(),
@@ -125,7 +155,7 @@ pub fn spawn(mut commands: Commands, play: Res<Match>, content: Single<Entity, W
         .id();
 
     for cell in &view.cells {
-        spawn_cell(&mut commands, grid_entity, cell);
+        spawn_cell(&mut commands, &fonts, grid_entity, cell);
     }
     for token in &view.tokens {
         spawn_token(
@@ -139,7 +169,16 @@ pub fn spawn(mut commands: Commands, play: Res<Match>, content: Single<Entity, W
     commands.entity(grid_entity).insert(grid);
 }
 
-fn spawn_cell(commands: &mut Commands, grid: Entity, view: &CellView) {
+/// Who looks at the board, and what they may do.
+fn viewer(play: &Match) -> Viewer {
+    Viewer {
+        side: play.my_side(),
+        hints: play.shows_hints(),
+        acts: play.can_move(),
+    }
+}
+
+fn spawn_cell(commands: &mut Commands, fonts: &Fonts, grid: Entity, view: &CellView) {
     let cell = commands
         .spawn((
             BoardCell {
@@ -182,6 +221,19 @@ fn spawn_cell(commands: &mut Commands, grid: Entity, view: &CellView) {
             ChildOf(ring),
         ))
         .id();
+    let key = commands
+        .spawn((
+            KeyLabel,
+            fonts.text("", TextStyle::bold(12.0, palette::KEY)),
+            Node {
+                position_type: PositionType::Absolute,
+                right: percent(7),
+                bottom: percent(2),
+                ..default()
+            },
+            ChildOf(cell),
+        ))
+        .id();
     commands
         .entity(frame)
         .insert(BorderColor::all(palette::OWN_EDGE));
@@ -192,6 +244,7 @@ fn spawn_cell(commands: &mut Commands, grid: Entity, view: &CellView) {
         frame,
         ring,
         dot,
+        key,
     };
     show_cell(commands, &parts, view);
     commands.entity(cell).insert(parts);
@@ -217,6 +270,32 @@ fn show_cell(commands: &mut Commands, parts: &CellParts, view: &CellView) {
         };
         commands.entity(parts.ring).insert(BorderColor::all(color));
         commands.entity(parts.dot).insert(BackgroundColor(color));
+    }
+
+    let key = view.key.map(|key| key.to_uppercase().to_string());
+    commands.entity(parts.key).insert((
+        visible_if(key.is_some()),
+        Text::new(key.unwrap_or_default()),
+    ));
+}
+
+/// Marks the key labels, sized to the cells.
+#[derive(Component)]
+struct KeyLabel;
+
+/// Keeps the key labels in proportion to the cells, which grow and
+/// shrink with the window.
+fn size_keys(
+    grid: Single<(&BoardGrid, &ComputedNode)>,
+    mut labels: Query<&mut TextFont, With<KeyLabel>>,
+) {
+    let (grid, node) = *grid;
+    let cell = node.size().x * node.inverse_scale_factor() / grid.columns as f32;
+    let size = FontSize::Px((KEY_SIZE * cell).round().max(9.0));
+    for mut font in &mut labels {
+        if font.font_size != size {
+            font.font_size = size;
+        }
     }
 }
 
@@ -255,7 +334,11 @@ fn spawn_token(
         .id();
     let disc = commands
         .spawn((
-            BackgroundColor(palette::TOKEN_FILL),
+            BackgroundColor(if view.spent {
+                palette::SPENT_FILL
+            } else {
+                palette::TOKEN_FILL
+            }),
             BoxShadow::new(palette::SHADOW, px(0), percent(6), px(0), percent(8)),
             ChildOf(token),
         ))
@@ -269,11 +352,14 @@ fn spawn_token(
 /// Applies a token's rim and halo.
 fn show_token(commands: &mut Commands, parts: &TokenParts, view: &TokenView) {
     // The token jumping wears a thick cyan rim, the others a thin light
-    // one (in percent of the token's cell).
-    let (rim, rim_color) = if view.jumping {
-        (7.0, palette::CYAN)
+    // one (in percent of the token's cell). Spent tokens fade into the
+    // board.
+    let (rim, rim_color, fill) = if view.jumping {
+        (7.0, palette::CYAN, palette::TOKEN_FILL)
+    } else if view.spent {
+        (3.0, palette::SPENT_EDGE, palette::SPENT_FILL)
     } else {
-        (3.0, palette::TOKEN_EDGE)
+        (3.0, palette::TOKEN_EDGE, palette::TOKEN_FILL)
     };
     commands.entity(parts.disc).insert((
         Node {
@@ -282,6 +368,7 @@ fn show_token(commands: &mut Commands, parts: &TokenParts, view: &TokenView) {
             ..centered(54.0)
         },
         BorderColor::all(rim_color),
+        ColorTo(fill),
     ));
 
     let (visibility, fill, ring) = match view.halo {
@@ -311,23 +398,25 @@ fn centered(size: f32) -> Node {
     }
 }
 
-/// Brings the board up to date with the match, animating every change.
+/// Brings the board up to date with the match and the sketch, animating
+/// every change.
 fn follow_match(
     mut commands: Commands,
     play: Res<Match>,
+    sketch: Res<Sketch>,
     grid: Single<(Entity, &BoardGrid)>,
     mut cells: Query<(Entity, &mut BoardCell, &CellParts)>,
     tokens: Query<(Entity, &BoardToken, &TokenParts, &Node)>,
-    mut shown_result: Local<Option<GameResult>>,
+    mut shown: Local<Shown>,
 ) {
     let Some(game) = play.game() else {
         return;
     };
-    let view = BoardView::of(game, play.shows_hints(), play.my_side());
+    let view = BoardView::of(game, viewer(&play));
     let (grid_entity, grid) = *grid;
 
     // Tokens first: where they hop decides when the cells they cross
-    // flip.
+    // flip. Lines drawn or erased sweep over their cells the same way.
     let mut hops = Vec::new();
     for (entity, token, parts, node) in &tokens {
         let Some(next) = view.tokens.iter().find(|next| next.id == token.view.id) else {
@@ -338,14 +427,9 @@ fn follow_match(
             continue;
         };
         if next.position != token.view.position {
-            let from = token.view.position;
-            let span = distance(from, next.position);
-            let duration = HOP_BASE + HOP_PER_CELL * span;
-            hops.push(Path {
-                from,
-                span,
-                duration,
-            });
+            let path = Path::new(token.view.position, next.position);
+            let duration = path.duration;
+            hops.push(path);
             commands.entity(entity).remove::<ScaleTo>().insert(Hop::new(
                 position_of(node),
                 grid.position(next.position),
@@ -364,23 +448,47 @@ fn follow_match(
         }
     }
 
+    let sweeps: Vec<Path> = hops
+        .iter()
+        .copied()
+        .chain(
+            sketch
+                .lines
+                .iter()
+                .filter(|line| !shown.lines.contains(line))
+                .chain(
+                    shown
+                        .lines
+                        .iter()
+                        .filter(|line| !sketch.lines.contains(line)),
+                )
+                .map(|line| Path::new(line.from, line.to)),
+        )
+        .collect();
+    shown.lines = sketch.lines.clone();
+
     for (entity, mut cell, parts) in &mut cells {
         let Some(next) = view.cells.iter().find(|next| next.coord == cell.coord) else {
             continue;
         };
-        if next.cell != cell.shown {
-            cell.shown = next.cell;
-            let delay = flip_delay(cell.coord, &hops);
+        let shown = if sketch.flips(cell.coord) {
+            next.cell.flipped()
+        } else {
+            next.cell
+        };
+        if shown != cell.shown {
+            cell.shown = shown;
+            let (delay, direction) = flip_timing(cell.coord, &sweeps);
             commands
                 .entity(entity)
-                .insert(Flip::to(cell_color(next.cell), delay));
+                .insert(Flip::to(cell_color(shown), delay, direction));
         }
         show_cell(&mut commands, parts, next);
     }
 
     // A win: the winner's cells bounce, once the last flips settle.
-    if game.result() != *shown_result {
-        *shown_result = game.result();
+    if game.result() != shown.result {
+        shown.result = game.result();
         if let Some(GameResult::Winner { side, .. }) = game.result() {
             let settled = hops.iter().map(|hop| hop.duration).fold(0.0, f32::max) + 0.3;
             for (entity, cell, _) in &cells {
@@ -394,23 +502,84 @@ fn follow_match(
     }
 }
 
-/// A token's move this update.
+/// What the board last showed, beyond its entities.
+#[derive(Default)]
+struct Shown {
+    result: Option<GameResult>,
+    lines: Vec<Line>,
+}
+
+/// A sweep over the board this update: a token's move, or a sketched
+/// line drawn or erased.
+#[derive(Clone, Copy)]
 struct Path {
     from: Coord,
+    to: Coord,
     /// Length in cells.
     span: f32,
     duration: f32,
 }
 
-/// When a changed cell flips: as the hopping token passes over it, or,
-/// with nothing hopping (a new deal), in a wave across the board.
-fn flip_delay(coord: Coord, hops: &[Path]) -> f32 {
-    if hops.is_empty() {
-        return wave_delay(coord);
+impl Path {
+    fn new(from: Coord, to: Coord) -> Self {
+        let span = distance(from, to);
+        Self {
+            from,
+            to,
+            span,
+            duration: HOP_BASE + HOP_PER_CELL * span,
+        }
     }
-    hops.iter()
-        .map(|hop| hop.duration * (distance(hop.from, coord) / hop.span).min(1.0))
-        .fold(f32::INFINITY, f32::min)
+
+    /// When the sweep reaches `coord`.
+    fn reach(&self, coord: Coord) -> f32 {
+        if self.span == 0.0 {
+            return 0.0;
+        }
+        self.duration * (distance(self.from, coord) / self.span).min(1.0)
+    }
+
+    /// The way the sweep goes, as a unit step along its longer axis; zero
+    /// for a single cell.
+    fn direction(&self) -> Vec2 {
+        let (dx, dy) = (self.to.x - self.from.x, self.to.y - self.from.y);
+        if dx.abs() >= dy.abs() {
+            vec2(dx.signum() as f32, 0.0)
+        } else {
+            vec2(0.0, dy.signum() as f32)
+        }
+    }
+
+    /// Whether `coord` lies on the straight run from `from` to `to`.
+    fn covers(&self, coord: Coord) -> bool {
+        Line {
+            from: self.from,
+            to: self.to,
+        }
+        .covers(coord)
+    }
+}
+
+/// When and which way a changed cell flips: with the sweep passing over
+/// it, or, with nothing sweeping (a new deal), in a wave across the
+/// board.
+fn flip_timing(coord: Coord, sweeps: &[Path]) -> (f32, Vec2) {
+    if sweeps.is_empty() {
+        return (wave_delay(coord), Vec2::ZERO);
+    }
+    // A sweep over the cell, else (several hops arriving at once) the
+    // nearest.
+    let over: Vec<&Path> = sweeps.iter().filter(|sweep| sweep.covers(coord)).collect();
+    let candidates = if over.is_empty() {
+        sweeps.iter().collect()
+    } else {
+        over
+    };
+    candidates
+        .into_iter()
+        .map(|sweep| (sweep.reach(coord), sweep.direction()))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .expect("there is a sweep")
 }
 
 /// A diagonal wave from the top-left corner.
@@ -446,5 +615,56 @@ fn visible_if(visible: bool) -> Visibility {
 fn tap_cell(tap: On<Tap>, cells: Query<&BoardCell>, mut play: ResMut<Match>) {
     if let Ok(cell) = cells.get(tap.entity) {
         play.click(cell.coord);
+    }
+}
+
+/// A mark of the sketch on the board.
+#[derive(Component)]
+struct SketchMark;
+
+/// Draws the sketch's lines over the board, each ending in a dot; the
+/// line being drawn shows fainter.
+fn show_sketch(
+    mut commands: Commands,
+    sketch: Res<Sketch>,
+    grid: Single<(Entity, &BoardGrid)>,
+    marks: Query<Entity, With<SketchMark>>,
+) {
+    for mark in &marks {
+        commands.entity(mark).despawn();
+    }
+    let (grid_entity, grid) = *grid;
+    let lines = sketch.lines.iter().map(|&line| (line, palette::SKETCH));
+    let drawing = sketch.drawing.map(|line| {
+        (
+            line,
+            palette::SKETCH.with_alpha(palette::SKETCH.alpha() * 0.6),
+        )
+    });
+    for (line, color) in lines.chain(drawing) {
+        let (low, high) = (
+            Coord::new(line.from.x.min(line.to.x), line.from.y.min(line.to.y)),
+            Coord::new(line.from.x.max(line.to.x), line.from.y.max(line.to.y)),
+        );
+        let bar = grid.span(low, high, SKETCH_LINE);
+        let dot = grid.span(line.to, line.to, SKETCH_DOT);
+        for rect in [bar, dot] {
+            commands.spawn((
+                SketchMark,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: percent(rect.min.x),
+                    top: percent(rect.min.y),
+                    width: percent(rect.width()),
+                    height: percent(rect.height()),
+                    border_radius: BorderRadius::MAX,
+                    ..default()
+                },
+                BackgroundColor(color),
+                // Over the tokens.
+                ZIndex(1),
+                ChildOf(grid_entity),
+            ));
+        }
     }
 }

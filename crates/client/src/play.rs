@@ -8,13 +8,12 @@
 //! views can redraw on `resource_changed::<Match>`.
 
 use bevy::prelude::*;
-use hibedi_core::{BOARD_HEIGHT, BOARD_WIDTH, Coord, Game, Phase, Side};
+use hibedi_core::{Action, BOARD_HEIGHT, BOARD_WIDTH, Coord, Game, Side};
 
 use crate::session::Session;
 
 pub fn plugin(app: &mut App) {
-    app.add_systems(PreUpdate, sync_session.run_if(resource_exists::<Match>))
-        .add_systems(Update, new_game_on_key.run_if(resource_exists::<Match>));
+    app.add_systems(PreUpdate, sync_session.run_if(resource_exists::<Match>));
 }
 
 /// Pulls in what the session received, marking the match changed only
@@ -22,12 +21,6 @@ pub fn plugin(app: &mut App) {
 fn sync_session(mut play: ResMut<Match>) {
     if play.bypass_change_detection().update() {
         play.set_changed();
-    }
-}
-
-fn new_game_on_key(keys: Res<ButtonInput<KeyCode>>, mut play: ResMut<Match>) {
-    if keys.just_pressed(KeyCode::KeyR) {
-        play.start_new_game();
     }
 }
 
@@ -135,7 +128,30 @@ impl Match {
         }
     }
 
-    /// Applies a click on a board cell.
+    /// The actions we may take now: the game's, while it takes our
+    /// input.
+    pub fn actions(&self) -> Vec<Action> {
+        match &self.game {
+            Some(game) if self.can_move() => game.actions(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Takes one of [`Match::actions`].
+    pub fn act(&mut self, action: Action) {
+        if !self.can_move() {
+            return;
+        }
+        if let Some(game) = &mut self.game
+            && game.apply(action)
+        {
+            self.publish();
+        }
+    }
+
+    /// Applies a click on a board cell: the action aimed at it, if any.
+    /// A click on another glowing token swaps the token about to jump
+    /// for it, taking back the current choice first.
     pub fn click(&mut self, coord: Coord) {
         if !self.can_move() {
             return;
@@ -143,19 +159,25 @@ impl Match {
         let Some(game) = &mut self.game else {
             return;
         };
-        let token = game.board().token_at(coord);
-        let changed = match game.phase() {
-            Phase::PlaceInitialToken => game.try_place_initial_token(coord),
-            // A landing cell hops; another glowing token takes over the
-            // turn instead (allowed until the first hop).
-            Phase::ChooseJump => {
-                game.try_jump_to(coord)
-                    || token.is_some_and(|token| game.try_select_activated_token(token))
-            }
-            Phase::ChooseActivatedToken => {
-                token.is_some_and(|token| game.try_select_activated_token(token))
-            }
-            Phase::GameOver => false,
+        let aimed = game
+            .actions()
+            .into_iter()
+            .find(|&action| game.action_cell(action) == Some(coord));
+        let changed = match aimed {
+            Some(action) => game.apply(action),
+            None => game
+                .board()
+                .token_at(coord)
+                .filter(|token| game.selectable_activated_tokens().contains(token))
+                .is_some_and(|token| {
+                    let mut swapped = game.clone();
+                    let done =
+                        swapped.apply(Action::Unselect) && swapped.apply(Action::Select(token));
+                    if done {
+                        *game = swapped;
+                    }
+                    done
+                }),
         };
         if changed {
             self.publish();
@@ -188,9 +210,8 @@ impl Match {
         let Some(game) = &mut self.game else {
             return false;
         };
-        if game.phase() == Phase::ChooseActivatedToken
-            && let [only] = game.selectable_activated_tokens()[..]
-            && game.try_select_activated_token(only)
+        if let [only @ Action::Select(_)] = game.actions()[..]
+            && game.apply(only)
         {
             self.publish();
             return true;

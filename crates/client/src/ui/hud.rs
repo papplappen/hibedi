@@ -62,6 +62,8 @@ const NAME: TextStyle = TextStyle::bold(16.0, palette::TEXT);
 const YOU: TextStyle = TextStyle::bold(11.0, palette::MUTED);
 const COUNT: TextStyle = TextStyle::bold(24.0, palette::TEXT);
 
+const HELP: TextStyle = TextStyle::regular(13.0, palette::MUTED);
+
 const BUTTON_H: f32 = 44.0;
 const BUTTON: TextStyle = TextStyle::bold(15.0, palette::TEXT);
 
@@ -87,7 +89,8 @@ pub fn spawn(
     ));
 }
 
-/// The sidebar: score, turn card and the new-game button.
+/// The sidebar: score, turn card, the new-game button and a word on the
+/// controls beyond clicking.
 pub fn spawn_sidebar(
     mut commands: Commands,
     fonts: Res<Fonts>,
@@ -100,6 +103,19 @@ pub fn spawn_sidebar(
     let turn = spawn_text_card(&mut commands, &fonts, sidebar);
     commands.entity(turn).insert(TurnCard);
     spawn_new_game_button(&mut commands, &fonts, sidebar);
+    commands.spawn((
+        fonts.text(
+            "Right-drag across cells to try a jump out; click to clear.\n\
+             Keys: those in the cell corners, Esc to choose another \
+             token, F2 for a new game.",
+            HELP,
+        ),
+        Node {
+            margin: UiRect::horizontal(px(4)),
+            ..default()
+        },
+        ChildOf(sidebar),
+    ));
 }
 
 fn card_node() -> Node {

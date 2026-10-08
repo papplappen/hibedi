@@ -4,7 +4,7 @@
 //!
 //! | component   | drives                              |
 //! |-------------|-------------------------------------|
-//! | [`Flip`]    | horizontal scale, background        |
+//! | [`Flip`]    | scale, translation, background      |
 //! | [`Hop`]     | `left`/`top`, scale                 |
 //! | [`ScaleTo`] | scale                               |
 //! | [`Bounce`]  | vertical translation                |
@@ -59,22 +59,30 @@ fn arc(t: f32) -> f32 {
 }
 
 /// Turns a node over like a card, showing the new color from halfway.
+/// Given a direction, the turn runs along it, as if swept over by
+/// something passing: the old face folds away into the front edge, and
+/// the new one unfolds from the back edge.
 #[derive(Component)]
 pub struct Flip {
     clock: Clock,
     to: Color,
+    /// A unit step in screen space (y down), or zero to turn in place.
+    direction: Vec2,
 }
 
 impl Flip {
     const DURATION: f32 = 0.32;
+    /// How much the node grows across the turn halfway through.
+    const LIFT: f32 = 0.08;
 
-    pub const fn to(color: Color, delay: f32) -> Self {
+    pub const fn to(color: Color, delay: f32, direction: Vec2) -> Self {
         Self {
             clock: Clock {
                 delay,
                 ..Clock::new(Self::DURATION)
             },
             to: color,
+            direction,
         }
     }
 }
@@ -88,12 +96,24 @@ fn flip(
         let Some(t) = flip.clock.tick(time.delta_secs()) else {
             continue;
         };
-        transform.scale = vec2((PI * t).cos().abs(), 1.0 + 0.08 * arc(t));
+        // Turning in place, the node turns about its vertical axis.
+        let along = if flip.direction.y.abs() > flip.direction.x.abs() {
+            Vec2::Y
+        } else {
+            Vec2::X
+        };
+        let width = (PI * t).cos().abs();
+        transform.scale = along * width + (Vec2::ONE - along) * (1.0 + Flip::LIFT * arc(t));
+        // The narrowed face hugs the front edge, then the back edge.
+        let hug = if t < 0.5 { 1.0 } else { -1.0 };
+        let shift = flip.direction * hug * (1.0 - width) / 2.0 * 100.0;
+        transform.translation = Val2::percent(shift.x, shift.y);
         if t >= 0.5 {
             background.0 = flip.to;
         }
         if t >= 1.0 {
             transform.scale = Vec2::ONE;
+            transform.translation = Val2::ZERO;
             commands.entity(entity).remove::<Flip>();
         }
     }

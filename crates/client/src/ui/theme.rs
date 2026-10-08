@@ -26,6 +26,9 @@ pub mod palette {
     pub const USED_CELL_OVERLAY: Color = Color::srgba_u8(43, 48, 57, 185);
     pub const TOKEN_FILL: Color = Color::srgb_u8(24, 31, 43);
     pub const TOKEN_EDGE: Color = Color::srgb_u8(239, 236, 220);
+    /// Tokens that jumped this turn and are done for it.
+    pub const SPENT_FILL: Color = Color::srgb_u8(70, 74, 82);
+    pub const SPENT_EDGE: Color = Color::srgb_u8(128, 130, 132);
     pub const SHADOW: Color = Color::srgba(0.0, 0.0, 0.0, 0.35);
     /// Jump landings, glowing tokens, primary buttons.
     pub const GOLD: Color = Color::srgb_u8(194, 137, 38);
@@ -33,6 +36,10 @@ pub mod palette {
     pub const CYAN: Color = Color::srgb_u8(33, 139, 154);
     /// Marks what belongs to the viewer online.
     pub const OWN_EDGE: Color = Color::srgb_u8(245, 242, 232);
+    /// Key labels on (empty) cells.
+    pub const KEY: Color = Color::srgba_u8(24, 31, 43, 150);
+    /// Lines sketching moves.
+    pub const SKETCH: Color = Color::srgba_u8(84, 120, 230, 190);
 }
 
 pub fn side_color(side: Side) -> Color {

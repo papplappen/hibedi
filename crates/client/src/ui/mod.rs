@@ -5,6 +5,7 @@
 //! - [`layout`]: the skeleton, adapting to the window,
 //! - [`board`]: cells and tokens,
 //! - [`hud`]: everything around the board,
+//! - [`keys`]: playing by keyboard,
 //! - [`anim`]: the animations views use,
 //! - [`tap`]: taps and clicks on nodes,
 //! - [`theme`]: colors and fonts.
@@ -12,6 +13,7 @@
 mod anim;
 mod board;
 mod hud;
+mod keys;
 mod layout;
 mod tap;
 mod theme;
@@ -42,6 +44,7 @@ pub fn plugin(app: &mut App) {
             layout::plugin,
             board::plugin,
             hud::plugin,
+            keys::plugin,
             tap::plugin,
         ))
         .add_systems(Startup, (spawn_camera, layout::spawn, hud::spawn).chain())
