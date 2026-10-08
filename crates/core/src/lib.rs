@@ -4,9 +4,178 @@ use std::fmt;
 
 use rand::{Rng, RngExt};
 
-/// Default playable board size shared by client and server.
-pub const BOARD_WIDTH: usize = 4;
-pub const BOARD_HEIGHT: usize = 5;
+/// The cells a board is played on: a square grid, or a rhombus of hexes.
+/// A grid owns what a coordinate means — which cells exist, which are
+/// playable, and which cells neighbour each other — so the rules never
+/// assume a shape.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum Grid {
+    /// Cells on rows and columns, stepping up, right, down and left.
+    Square { width: usize, height: usize },
+    /// A rhombus of hexes: no cell sits straight above another, and
+    /// rows shift half a cell sideways.
+    Hex { columns: usize, rows: usize },
+}
+
+impl Grid {
+    /// The board dealt by default, and the square grid to compare hexes
+    /// against.
+    pub const SQUARE: Self = Self::Square {
+        width: 4,
+        height: 5,
+    };
+
+    /// The same number of cells as [`Grid::SQUARE`], on a hex lattice.
+    pub const HEX: Self = Self::Hex {
+        columns: 4,
+        rows: 5,
+    };
+
+    pub const fn is_hex(self) -> bool {
+        matches!(self, Self::Hex { .. })
+    }
+
+    /// Playable cells, not counting the outer ring.
+    pub const fn playable_count(self) -> usize {
+        match self {
+            Self::Square { width, height } => width * height,
+            Self::Hex { columns, rows } => columns * rows,
+        }
+    }
+
+    /// How many cells wide and high the grid is, its outer ring
+    /// included.
+    pub const fn storage_size(self) -> (usize, usize) {
+        let (width, height) = self.playable_size();
+        (width + 2, height + 2)
+    }
+
+    /// How many playable cells wide and high the grid is.
+    pub const fn playable_size(self) -> (usize, usize) {
+        match self {
+            Self::Square { width, height } => (width, height),
+            Self::Hex { columns, rows } => (columns, rows),
+        }
+    }
+
+    /// The directions a jump or an activation may take on this grid.
+    pub const fn directions(self) -> &'static [Direction] {
+        match self {
+            Self::Square { .. } => &[
+                Direction::Up,
+                Direction::Right,
+                Direction::Down,
+                Direction::Left,
+            ],
+            Self::Hex { .. } => &[
+                Direction::Right,
+                Direction::DownRight,
+                Direction::DownLeft,
+                Direction::Left,
+                Direction::UpLeft,
+                Direction::UpRight,
+            ],
+        }
+    }
+
+    /// The step from a cell to its neighbour in `direction`. Only the
+    /// directions [`Grid::directions`] lists are ever asked for; the
+    /// others are the plain diagonal steps, so the answer is still a
+    /// step rather than a hole in the match.
+    pub const fn step(self, direction: Direction) -> Coord {
+        let (dx, dy) = match (self.is_hex(), direction) {
+            (false, Direction::Up) => (0, -1),
+            (false, Direction::Down) => (0, 1),
+            (false, Direction::Left) => (-1, 0),
+            (false, Direction::Right) => (1, 0),
+            (false, Direction::UpLeft) => (-1, -1),
+            (false, Direction::DownLeft) => (-1, 1),
+            (false, Direction::UpRight) => (1, -1),
+            (false, Direction::DownRight) => (1, 1),
+            (true, Direction::Left) => (-1, 0),
+            (true, Direction::Right) => (1, 0),
+            (true, Direction::UpLeft) => (0, -1),
+            (true, Direction::DownRight) => (0, 1),
+            (true, Direction::DownLeft) => (-1, 1),
+            (true, Direction::UpRight) => (1, -1),
+            // Up and down are not axes of a hex lattice: its cells sit
+            // half a step off to the side instead.
+            (true, Direction::Up | Direction::Down) => (0, -1),
+        };
+        Coord::new(dx, dy)
+    }
+
+    /// Whether `coord` is a playable cell, as opposed to the outer ring.
+    pub const fn contains_playable(self, coord: Coord) -> bool {
+        let (width, height) = self.playable_size();
+        coord.x >= 1 && coord.y >= 1 && (coord.x as usize) <= width && (coord.y as usize) <= height
+    }
+
+    /// Whether `coord` is any cell the grid holds, the ring included.
+    pub const fn contains_storage(self, coord: Coord) -> bool {
+        let (width, height) = self.storage_size();
+        let in_box = coord.x >= 0
+            && coord.y >= 0
+            && (coord.x as usize) < width
+            && (coord.y as usize) < height;
+
+        match self {
+            // Every cell of the box is playable or a step from one.
+            Self::Square { .. } => in_box,
+            Self::Hex { columns, rows } => {
+                // The box's far corners are a step from the ring only:
+                // no run of colored cells reaches past the playable
+                // cells to them, so they are not cells.
+                let ring_corner = (coord.x == 0 && coord.y == 0)
+                    || ((coord.x as usize) == columns + 1 && (coord.y as usize) == rows + 1);
+                in_box && !ring_corner
+            }
+        }
+    }
+
+    /// Every playable cell, row by row.
+    pub fn playable_coords(self) -> impl Iterator<Item = Coord> {
+        let (width, height) = self.storage_size();
+        (0..height as i32)
+            .flat_map(move |y| (0..width as i32).map(move |x| Coord::new(x, y)))
+            .filter(move |&coord| self.contains_playable(coord))
+    }
+
+    /// Every cell of the storage grid, row by row.
+    pub fn storage_coords(self) -> impl Iterator<Item = Coord> {
+        let (width, height) = self.storage_size();
+        (0..height as i32)
+            .flat_map(move |y| (0..width as i32).map(move |x| Coord::new(x, y)))
+            .filter(move |&coord| self.contains_storage(coord))
+    }
+
+    /// The grid a toggle between the two switches to.
+    pub const fn other(self) -> Self {
+        match self {
+            Self::Square { width, height } => Self::Hex {
+                columns: width,
+                rows: height,
+            },
+            Self::Hex { columns, rows } => Self::Square {
+                width: columns,
+                height: rows,
+            },
+        }
+    }
+}
+
+impl fmt::Display for Grid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (columns, rows) = self.playable_size();
+        match self {
+            Self::Square { .. } => write!(f, "Square {columns}x{rows}"),
+            Self::Hex { .. } => write!(f, "Hex {columns}x{rows}"),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,32 +244,27 @@ impl Coord {
         Self { x, y }
     }
 
-    const fn shifted(self, direction: Direction) -> Self {
-        let (dx, dy) = direction.delta();
-        Self::new(self.x + dx, self.y + dy)
+    /// The neighbour of this cell in `direction` on `grid`.
+    pub fn shifted(self, grid: Grid, direction: Direction) -> Self {
+        let step = grid.step(direction);
+        Self::new(self.x + step.x, self.y + step.y)
     }
 }
 
+/// A way off a cell, on a compass. Which of these a grid steps in is the
+/// grid's own business: a square grid moves on the four cardinal ones, a
+/// hex lattice on six, none of them straight up or down.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
     Up,
+    UpRight,
     Right,
+    DownRight,
     Down,
+    DownLeft,
     Left,
-}
-
-impl Direction {
-    pub const ALL: [Self; 4] = [Self::Up, Self::Right, Self::Down, Self::Left];
-
-    pub const fn delta(self) -> (i32, i32) {
-        match self {
-            Self::Up => (0, -1),
-            Self::Right => (1, 0),
-            Self::Down => (0, 1),
-            Self::Left => (-1, 0),
-        }
-    }
+    UpLeft,
 }
 
 #[derive(
@@ -123,31 +287,29 @@ pub struct Jump {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Board {
-    width: usize,
-    height: usize,
+    grid: Grid,
     cells: Vec<Cell>,
     tokens: Vec<Token>,
 }
 
 impl Board {
-    pub fn random(width: usize, height: usize, rng: &mut impl Rng) -> Self {
+    /// A board on `grid` with every playable cell colored at random.
+    pub fn random(grid: Grid, rng: &mut impl Rng) -> Self {
         assert!(
-            width.saturating_mul(height) >= 2,
+            grid.playable_count() >= 2,
             "the board needs at least two playable cells"
         );
 
         loop {
-            let mut board = Self::empty(width, height);
+            let mut board = Self::empty(grid);
 
-            for y in 1..=height {
-                for x in 1..=width {
-                    let cell = match rng.random_range(0..4) {
-                        0 | 1 => Cell::Empty,
-                        2 => Cell::Red,
-                        _ => Cell::Green,
-                    };
-                    board.set_cell(Coord::new(x as i32, y as i32), cell);
-                }
+            for coord in grid.playable_coords() {
+                let cell = match rng.random_range(0..4) {
+                    0 | 1 => Cell::Empty,
+                    2 => Cell::Red,
+                    _ => Cell::Green,
+                };
+                board.set_cell(coord, cell);
             }
 
             if Side::ALL.iter().all(|&side| board.colored_count(side) > 0) {
@@ -156,25 +318,29 @@ impl Board {
         }
     }
 
-    fn empty(width: usize, height: usize) -> Self {
-        let storage_width = width + 2;
-        let storage_height = height + 2;
+    /// A board on `grid` with no colors and no tokens: cells are colored
+    /// with [`Board::set_cell`]. Intended for tests and scenario setup.
+    pub fn from_grid(grid: Grid) -> Self {
+        Self::empty(grid)
+    }
+
+    fn empty(grid: Grid) -> Self {
+        let (width, height) = grid.storage_size();
 
         Self {
-            width,
-            height,
-            cells: vec![Cell::Empty; storage_width * storage_height],
+            grid,
+            cells: vec![Cell::Empty; width * height],
             tokens: Vec::new(),
         }
     }
 
-    /// Builds a board from row strings using `.` for empty, `R` for red and
-    /// `G` for green. The outer ring is left empty. Intended for tests and
-    /// scenario setup.
+    /// Builds a square board from row strings using `.` for empty, `R`
+    /// for red and `G` for green. The outer ring is left empty. Intended
+    /// for tests and scenario setup.
     pub fn from_rows(rows: &[&str]) -> Self {
         let height = rows.len();
         let width = rows.first().map_or(0, |row| row.len());
-        let mut board = Self::empty(width, height);
+        let mut board = Self::from_grid(Grid::Square { width, height });
 
         for (y, row) in rows.iter().enumerate() {
             assert_eq!(row.len(), width, "all board rows must have equal length");
@@ -192,26 +358,27 @@ impl Board {
         board
     }
 
-    pub const fn storage_width(&self) -> usize {
-        self.width + 2
-    }
-
-    pub const fn storage_height(&self) -> usize {
-        self.height + 2
+    pub const fn grid(&self) -> Grid {
+        self.grid
     }
 
     pub fn is_in_storage(&self, coord: Coord) -> bool {
-        coord.x >= 0
-            && coord.y >= 0
-            && (coord.x as usize) < self.storage_width()
-            && (coord.y as usize) < self.storage_height()
+        self.grid.contains_storage(coord)
     }
 
     pub fn is_playable_cell(&self, coord: Coord) -> bool {
-        coord.x >= 1
-            && coord.y >= 1
-            && (coord.x as usize) <= self.width
-            && (coord.y as usize) <= self.height
+        self.grid.contains_playable(coord)
+    }
+
+    /// Colors a cell. Only playable cells take a color; the outer ring
+    /// stays empty. Intended for tests and scenario setup.
+    pub fn set_cell(&mut self, coord: Coord, cell: Cell) {
+        assert!(
+            self.is_playable_cell(coord),
+            "only playable cells are colored, and {coord:?} is not one"
+        );
+        let index = self.index(coord);
+        self.cells[index] = cell;
     }
 
     pub fn cell_at(&self, coord: Coord) -> Option<Cell> {
@@ -272,9 +439,10 @@ impl Board {
     /// ring included) with a jump available from it.
     fn initial_placements(&self) -> impl Iterator<Item = Coord> {
         let no_history = BTreeSet::new();
+        let directions = self.grid.directions();
         self.storage_coords().filter(move |&coord| {
             self.can_host_token(coord)
-                && Direction::ALL.into_iter().any(|direction| {
+                && directions.iter().any(|&direction| {
                     self.legal_jump_from(coord, direction, &no_history)
                         .is_some()
                 })
@@ -283,15 +451,12 @@ impl Board {
 
     /// Every cell inside the outer ring, row by row.
     fn playable_coords(&self) -> impl Iterator<Item = Coord> {
-        self.storage_coords()
-            .filter(|&coord| self.is_playable_cell(coord))
+        self.grid.playable_coords()
     }
 
     /// Every cell of the storage grid, row by row.
-    fn storage_coords(&self) -> impl Iterator<Item = Coord> {
-        let width = self.storage_width() as i32;
-        let height = self.storage_height() as i32;
-        (0..height).flat_map(move |y| (0..width).map(move |x| Coord::new(x, y)))
+    pub fn storage_coords(&self) -> impl Iterator<Item = Coord> {
+        self.grid.storage_coords()
     }
 
     pub fn legal_jump_from(
@@ -304,7 +469,7 @@ impl Board {
             return None;
         }
 
-        let mut cursor = origin.shifted(direction);
+        let mut cursor = origin.shifted(self.grid, direction);
         let mut crossed = Vec::new();
 
         while self.is_in_storage(cursor) {
@@ -321,7 +486,7 @@ impl Board {
             }
 
             crossed.push(cursor);
-            cursor = cursor.shifted(direction);
+            cursor = cursor.shifted(self.grid, direction);
         }
 
         if crossed.is_empty()
@@ -348,22 +513,17 @@ impl Board {
             return Vec::new();
         };
 
-        Direction::ALL
-            .into_iter()
-            .filter_map(|direction| self.legal_jump_from(origin, direction, crossed_this_chain))
+        self.grid
+            .directions()
+            .iter()
+            .filter_map(|&direction| self.legal_jump_from(origin, direction, crossed_this_chain))
             .collect()
     }
 
     fn index(&self, coord: Coord) -> usize {
         debug_assert!(self.is_in_storage(coord));
-        coord.y as usize * self.storage_width() + coord.x as usize
-    }
-
-    fn set_cell(&mut self, coord: Coord, cell: Cell) {
-        debug_assert!(self.is_in_storage(coord));
-        debug_assert!(self.is_playable_cell(coord) || cell == Cell::Empty);
-        let index = self.index(coord);
-        self.cells[index] = cell;
+        let (width, _) = self.grid.storage_size();
+        coord.y as usize * width + coord.x as usize
     }
 
     fn can_host_token(&self, coord: Coord) -> bool {
@@ -458,8 +618,9 @@ pub struct Game {
 }
 
 impl Game {
-    pub fn new_random(width: usize, height: usize, rng: &mut impl Rng) -> Self {
-        let board = Board::random(width, height, rng);
+    /// Deals a random game on `grid`.
+    pub fn new_random(grid: Grid, rng: &mut impl Rng) -> Self {
+        let board = Board::random(grid, rng);
         let tie_breaker = if rng.random_range(0..2) == 0 {
             Side::Red
         } else {
@@ -685,9 +846,10 @@ impl Game {
     }
 
     fn activate_neighbors(&mut self, crossed: &[Coord]) {
+        let directions = self.board.grid.directions();
         for &coord in crossed {
-            for direction in Direction::ALL {
-                let neighbor = coord.shifted(direction);
+            for &direction in directions {
+                let neighbor = coord.shifted(self.board.grid, direction);
                 let Some(token) = self.board.token_at(neighbor) else {
                     continue;
                 };
@@ -740,6 +902,15 @@ mod tests {
 
     fn board_from_rows(rows: &[&str]) -> Board {
         Board::from_rows(rows)
+    }
+
+    /// A hex board with the given colored cells.
+    fn hex_board(cells: &[(Coord, Cell)]) -> Board {
+        let mut board = Board::from_grid(Grid::HEX);
+        for &(coord, cell) in cells {
+            board.set_cell(coord, cell);
+        }
+        board
     }
 
     #[test]
@@ -944,13 +1115,10 @@ mod tests {
     fn dead_board_uses_colored_cell_majority() {
         let mut board = board_from_rows(&["RR", "RG"]);
         let mut id = 1;
-        for y in 0..board.storage_height() as i32 {
-            for x in 0..board.storage_width() as i32 {
-                let coord = Coord::new(x, y);
-                if !board.is_playable_cell(coord) {
-                    assert!(board.add_token(TokenId(id), coord));
-                    id += 1;
-                }
+        for coord in board.grid().storage_coords() {
+            if !board.is_playable_cell(coord) {
+                assert!(board.add_token(TokenId(id), coord));
+                id += 1;
             }
         }
 
@@ -963,5 +1131,144 @@ mod tests {
                 reason: WinReason::Majority,
             })
         );
+    }
+
+    #[test]
+    fn a_hex_board_is_a_rhombus_with_a_full_ring() {
+        let (width, height) = Grid::HEX.storage_size();
+        assert_eq!((width, height), (6, 7));
+        assert_eq!(Grid::HEX.playable_count(), Grid::SQUARE.playable_count());
+        assert_eq!(Grid::HEX.other(), Grid::SQUARE);
+
+        let board = Board::from_grid(Grid::HEX);
+        for coord in Grid::HEX.playable_coords() {
+            for direction in Grid::HEX.directions() {
+                assert!(
+                    board.is_in_storage(coord.shifted(Grid::HEX, *direction)),
+                    "a playable cell's every neighbour is on the board"
+                );
+            }
+        }
+
+        // Every ring cell touches the playable area, so a token there is
+        // always within reach of a chain.
+        for coord in Grid::HEX
+            .storage_coords()
+            .filter(|c| !Grid::HEX.contains_playable(*c))
+        {
+            assert!(
+                Grid::HEX
+                    .directions()
+                    .iter()
+                    .any(|&direction| Grid::HEX
+                        .contains_playable(coord.shifted(Grid::HEX, direction))),
+                "the ring cell {coord:?} should touch a playable cell"
+            );
+        }
+    }
+
+    #[test]
+    fn every_grid_steps_the_same_cell_back_again() {
+        for grid in [Grid::SQUARE, Grid::HEX] {
+            for direction in grid.directions() {
+                let back = match direction {
+                    Direction::Up | Direction::Down => continue,
+                    Direction::Right => Direction::Left,
+                    Direction::Left => Direction::Right,
+                    Direction::UpRight => Direction::DownLeft,
+                    Direction::UpLeft => Direction::DownRight,
+                    Direction::DownRight => Direction::UpLeft,
+                    Direction::DownLeft => Direction::UpRight,
+                };
+                let start = Coord::new(2, 2);
+                let there = start.shifted(grid, *direction);
+                assert_ne!(there, start, "{grid} should step somewhere");
+                assert_eq!(there.shifted(grid, back), start);
+            }
+        }
+    }
+
+    #[test]
+    fn hex_runs_run_on_the_diagonals() {
+        // A hex board has no cell straight above another: its columns
+        // are diagonals.
+        let mut board = hex_board(&[
+            (Coord::new(2, 3), Cell::Red),
+            (Coord::new(3, 2), Cell::Green),
+        ]);
+        let token = TokenId(1);
+        assert!(board.add_token(token, Coord::new(1, 4)));
+
+        let jumps = board.legal_jumps_for_token(token, &BTreeSet::new());
+        let jump = jumps
+            .iter()
+            .find(|jump| jump.direction == Direction::UpRight)
+            .expect("the diagonal run should be jumpable");
+
+        assert_eq!(jump.crossed, vec![Coord::new(2, 3), Coord::new(3, 2)]);
+        assert_eq!(jump.landing, Coord::new(4, 1));
+    }
+
+    #[test]
+    fn a_hex_run_can_land_in_the_outer_ring() {
+        let mut board = hex_board(&[
+            (Coord::new(2, 2), Cell::Red),
+            (Coord::new(2, 3), Cell::Red),
+            (Coord::new(2, 4), Cell::Red),
+            (Coord::new(2, 5), Cell::Red),
+        ]);
+        let token = TokenId(1);
+        assert!(board.add_token(token, Coord::new(2, 1)));
+
+        let jumps = board.legal_jumps_for_token(token, &BTreeSet::new());
+        let jump = jumps
+            .iter()
+            .find(|jump| jump.direction == Direction::DownRight)
+            .expect("the column should be jumpable");
+
+        assert_eq!(jump.landing, Coord::new(2, 6));
+        assert!(!board.is_playable_cell(jump.landing));
+    }
+
+    #[test]
+    fn crossing_activates_hex_neighbors_a_square_grid_would_miss() {
+        let mut board = hex_board(&[
+            (Coord::new(3, 1), Cell::Green),
+            (Coord::new(1, 2), Cell::Red),
+            (Coord::new(1, 3), Cell::Red),
+            (Coord::new(4, 4), Cell::Red),
+        ]);
+        // Up and right of a crossed cell: neighbours on a hex board, a
+        // diagonal step apart on a square one.
+        let waiting = TokenId(10);
+        assert!(board.add_token(waiting, Coord::new(2, 1)));
+        let mut game = Game::from_board(board, Side::Green);
+
+        assert!(game.try_place_initial_token(Coord::new(1, 1)));
+        assert!(game.try_jump(Direction::DownRight));
+
+        assert_eq!(game.phase(), Phase::ChooseActivatedToken);
+        assert_eq!(game.pending_activated_tokens(), &[waiting]);
+        assert_eq!(game.selectable_activated_tokens(), vec![waiting]);
+    }
+
+    #[test]
+    fn hex_games_round_trip_through_json_with_their_grid() {
+        let mut board = hex_board(&[
+            (Coord::new(1, 1), Cell::Green),
+            (Coord::new(2, 2), Cell::Red),
+            (Coord::new(2, 3), Cell::Red),
+            (Coord::new(4, 5), Cell::Green),
+        ]);
+        assert!(board.add_token(TokenId(5), Coord::new(3, 1)));
+        let mut game = Game::from_board(board, Side::Green);
+        assert!(game.try_place_initial_token(Coord::new(2, 1)));
+        assert!(game.try_jump(Direction::DownRight));
+
+        let json = serde_json::to_string(&game).unwrap();
+        let back: Game = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, game);
+        assert_eq!(back.board().grid(), Grid::HEX);
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
     }
 }

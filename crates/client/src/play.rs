@@ -8,7 +8,7 @@
 //! views can redraw on `resource_changed::<Match>`.
 
 use bevy::prelude::*;
-use hibedi_core::{BOARD_HEIGHT, BOARD_WIDTH, Coord, Game, Phase, Side};
+use hibedi_core::{Coord, Game, Grid, Phase, Side};
 
 use crate::session::Session;
 
@@ -29,6 +29,9 @@ fn new_game_on_key(keys: Res<ButtonInput<KeyCode>>, mut play: ResMut<Match>) {
     if keys.just_pressed(KeyCode::KeyR) {
         play.start_new_game();
     }
+    if keys.just_pressed(KeyCode::KeyH) {
+        play.toggle_grid();
+    }
 }
 
 #[derive(Resource)]
@@ -39,15 +42,18 @@ pub struct Match {
     /// Whether the other player is connected, as of the last update;
     /// `None` in hotseat.
     opponent_online: Option<bool>,
+    /// The grid the next game is dealt on.
+    grid: Grid,
 }
 
 impl Match {
     /// A hotseat game on this device.
     pub fn local() -> Self {
         Self {
-            game: Some(new_game()),
+            game: Some(new_game(Grid::SQUARE)),
             session: None,
             opponent_online: None,
+            grid: Grid::SQUARE,
         }
     }
 
@@ -58,16 +64,22 @@ impl Match {
             opponent_online: Some(session.everyone_online()),
             game: None,
             session: Some(session),
+            grid: Grid::SQUARE,
         };
         play.adopt_received();
         if play.game.is_none() && play.my_side() == Some(Side::ALL[0]) {
-            play.set_game(new_game());
+            play.set_game(new_game(play.grid));
         }
         play
     }
 
     pub fn game(&self) -> Option<&Game> {
         self.game.as_ref()
+    }
+
+    /// The grid the game is played on; `None` without a game.
+    pub fn grid(&self) -> Option<Grid> {
+        self.game.as_ref().map(|game| game.board().grid())
     }
 
     /// The side we play online; `None` in hotseat, where every side is
@@ -131,8 +143,15 @@ impl Match {
 
     pub fn start_new_game(&mut self) {
         if self.can_start_new_game() {
-            self.set_game(new_game());
+            self.set_game(new_game(self.grid));
         }
+    }
+
+    /// Deals the next game on the other grid: the same rules on a hex
+    /// lattice, or back on the square one.
+    pub fn toggle_grid(&mut self) {
+        self.grid = self.grid.other();
+        self.start_new_game();
     }
 
     /// Applies a click on a board cell.
@@ -210,6 +229,6 @@ impl Match {
     }
 }
 
-fn new_game() -> Game {
-    Game::new_random(BOARD_WIDTH, BOARD_HEIGHT, &mut rand::rng())
+fn new_game(grid: Grid) -> Game {
+    Game::new_random(grid, &mut rand::rng())
 }

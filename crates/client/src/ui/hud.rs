@@ -17,7 +17,13 @@ pub fn plugin(app: &mut App) {
         Update,
         (
             show_notice.run_if(resource_changed::<Notice>),
-            (show_presence, show_score, show_turn, show_new_game)
+            (
+                show_presence,
+                show_score,
+                show_turn,
+                show_grid,
+                show_new_game,
+            )
                 .run_if(in_state(Screen::Playing).and_then(resource_changed::<Match>)),
             hover_buttons,
         )
@@ -59,6 +65,8 @@ const PILL_TEXT: TextStyle = TextStyle::bold(14.0, palette::TEXT);
 const SEAT_DOT: f32 = 10.0;
 
 const NAME: TextStyle = TextStyle::bold(16.0, palette::TEXT);
+/// The grid the game is on, under the turn card.
+const CAPTION: TextStyle = TextStyle::regular(13.0, palette::MUTED);
 const YOU: TextStyle = TextStyle::bold(11.0, palette::MUTED);
 const COUNT: TextStyle = TextStyle::bold(24.0, palette::TEXT);
 
@@ -99,6 +107,7 @@ pub fn spawn_sidebar(
     spawn_score(&mut commands, &fonts, sidebar);
     let turn = spawn_text_card(&mut commands, &fonts, sidebar);
     commands.entity(turn).insert(TurnCard);
+    spawn_grid_caption(&mut commands, &fonts, sidebar);
     spawn_new_game_button(&mut commands, &fonts, sidebar);
 }
 
@@ -521,6 +530,39 @@ fn show_score(
                 text.insert(ScaleTo::bump());
             }
         }
+    }
+}
+
+// --- grid ---
+
+/// Names the grid the game is played on, and the keys that change it.
+#[derive(Component)]
+struct GridCaption;
+
+fn spawn_grid_caption(commands: &mut Commands, fonts: &Fonts, sidebar: Entity) {
+    commands.spawn((
+        GridCaption,
+        fonts.text("", CAPTION),
+        UiTransform::IDENTITY,
+        ChildOf(sidebar),
+    ));
+}
+
+fn show_grid(
+    play: Res<Match>,
+    caption: Single<Entity, With<GridCaption>>,
+    mut texts: Query<&mut Text>,
+) {
+    let Some(grid) = play.grid() else {
+        return;
+    };
+    let Ok(mut texts) = texts.get_mut(*caption) else {
+        return;
+    };
+
+    let shown = format!("{grid} · H switches grid · R deals");
+    if texts.0 != shown {
+        texts.0 = shown;
     }
 }
 

@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use super::Screen;
-use super::board::{self, BoardFrame};
+use super::board::{self, BoardFrame, lattice::Lattice};
 use super::theme::{Fonts, TextStyle, palette};
 use crate::play::Match;
 
@@ -33,7 +33,8 @@ pub const GAP: f32 = 16.0;
 const SIDEBAR_W: f32 = 280.0;
 /// Widest a stacked sidebar or a notice card grows.
 pub const WIDE_CARD_W: f32 = 460.0;
-/// Below this cell size the board is not worth laying out larger.
+/// Below this cell size the board is not worth laying out larger: a
+/// cell's side on a square grid, a hex's radius on a hex one.
 const MIN_CELL: f32 = 12.0;
 
 const TITLE: TextStyle = TextStyle::bold(26.0, palette::TEXT);
@@ -163,24 +164,26 @@ fn fit_board(
     let Some(game) = play.game() else {
         return;
     };
-    let columns = game.board().storage_width() as f32;
-    let rows = game.board().storage_height() as f32;
+    let lattice = Lattice::new(game.board().grid());
     let (content_size, mut content) = content.into_inner();
     let (sidebar_size, mut sidebar) = sidebar.into_inner();
     let available = content_size.size() * content_size.inverse_scale_factor();
     let sidebar_h = sidebar_size.size().y * sidebar_size.inverse_scale_factor();
 
     let frame_w = 2.0 * board::FRAME;
-    let cell_for = |width: f32, height: f32| {
-        ((width - frame_w) / columns)
-            .min((height - frame_w) / rows)
-            .floor()
-            .max(MIN_CELL)
-    };
-    let beside = cell_for(available.x - GAP - SIDEBAR_W, available.y);
-    let stacked = cell_for(available.x, available.y - GAP - sidebar_h);
+    let beside = lattice.fit(
+        vec2(
+            available.x - GAP - SIDEBAR_W - frame_w,
+            available.y - frame_w,
+        ),
+        MIN_CELL,
+    );
+    let stacked = lattice.fit(
+        vec2(available.x - frame_w, available.y - GAP - sidebar_h),
+        MIN_CELL,
+    );
 
-    let (direction, align, cell, sidebar_w) = if beside >= stacked {
+    let (direction, align, size, sidebar_w) = if beside >= stacked {
         (
             FlexDirection::Row,
             AlignItems::FlexStart,
@@ -195,14 +198,15 @@ fn fit_board(
             percent(100),
         )
     };
+    let extent = lattice.extent(size);
     restyle(&mut content, |content| {
         content.flex_direction = direction;
         content.align_items = align;
     });
     restyle(&mut sidebar, |sidebar| sidebar.width = sidebar_w);
     restyle(&mut frame, |frame| {
-        frame.width = px(columns * cell + frame_w);
-        frame.height = px(rows * cell + frame_w);
+        frame.width = px(extent.x + frame_w);
+        frame.height = px(extent.y + frame_w);
     });
 }
 

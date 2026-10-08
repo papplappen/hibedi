@@ -62,8 +62,8 @@ impl BoardView {
         let selectable = game.selectable_activated_tokens();
         let pending = game.pending_activated_tokens();
 
-        let cells = (0..board.storage_height() as i32)
-            .flat_map(|y| (0..board.storage_width() as i32).map(move |x| Coord::new(x, y)))
+        let cells = board
+            .storage_coords()
             .map(|coord| {
                 let cell = board.cell_at(coord).unwrap_or(Cell::Empty);
                 let hint = if !hints {

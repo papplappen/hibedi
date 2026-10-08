@@ -7,6 +7,7 @@
 //! - [`ui`]: everything on screen, and turning clicks into moves.
 
 #![allow(
+    clippy::too_many_arguments,
     clippy::type_complexity,
     reason = "Bevy system parameters spell out their queries"
 )]

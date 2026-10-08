@@ -82,15 +82,21 @@ impl Flip {
 fn flip(
     time: Res<Time>,
     mut commands: Commands,
-    mut nodes: Query<(Entity, &mut Flip, &mut UiTransform, &mut BackgroundColor)>,
+    mut nodes: Query<(
+        Entity,
+        &mut Flip,
+        &mut UiTransform,
+        Option<&mut BackgroundColor>,
+        Option<&mut ImageNode>,
+    )>,
 ) {
-    for (entity, mut flip, mut transform, mut background) in &mut nodes {
+    for (entity, mut flip, mut transform, mut background, mut image) in &mut nodes {
         let Some(t) = flip.clock.tick(time.delta_secs()) else {
             continue;
         };
         transform.scale = vec2((PI * t).cos().abs(), 1.0 + 0.08 * arc(t));
         if t >= 0.5 {
-            background.0 = flip.to;
+            paint(&mut background, &mut image, flip.to);
         }
         if t >= 1.0 {
             transform.scale = Vec2::ONE;
@@ -276,16 +282,55 @@ impl ColorTo {
     const RATE: f32 = 14.0;
 }
 
-fn color_to(time: Res<Time>, mut nodes: Query<(&ColorTo, &mut BackgroundColor)>) {
+fn color_to(
+    time: Res<Time>,
+    mut nodes: Query<(
+        &ColorTo,
+        Option<&mut BackgroundColor>,
+        Option<&mut ImageNode>,
+    )>,
+) {
     let step = 1.0 - (-ColorTo::RATE * time.delta_secs()).exp();
-    for (target, mut background) in &mut nodes {
-        let current = background.0.to_linear();
-        let target = target.0.to_linear();
+    for (target, mut background, mut image) in &mut nodes {
+        let Some(current) = shown(&background, &image) else {
+            continue;
+        };
+        let (current, target) = (current.to_linear(), target.0.to_linear());
         let next = if current.distance(&target) < 0.002 {
             target
         } else {
             current.mix(&target, step)
         };
-        background.set_if_neq(BackgroundColor(next.into()));
+        // Painting every frame would mark the node changed every frame.
+        if next != current {
+            paint(&mut background, &mut image, next.into());
+        }
     }
+}
+
+/// Paints `color` on a node: its background, or the tint of its image.
+/// A cell shows its color in one or the other depending on its grid — a
+/// hex cell is an image, because Bevy's UI has no hexagon to fill with
+/// a background.
+fn paint(
+    background: &mut Option<Mut<BackgroundColor>>,
+    image: &mut Option<Mut<ImageNode>>,
+    color: Color,
+) {
+    match (image.as_mut(), background.as_mut()) {
+        (Some(image), _) => image.color = color,
+        (None, Some(background)) => background.0 = color,
+        (None, None) => {}
+    }
+}
+
+/// The color a node shows, to keep easing it toward a new one.
+fn shown(
+    background: &Option<Mut<BackgroundColor>>,
+    image: &Option<Mut<ImageNode>>,
+) -> Option<Color> {
+    image
+        .as_ref()
+        .map(|image| image.color)
+        .or_else(|| background.as_ref().map(|background| background.0))
 }
