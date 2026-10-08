@@ -11,9 +11,7 @@ use super::anim::{Animate, ScaleTo};
 use super::layout::{Content, HeaderEnd, Sidebar, WIDE_CARD_W};
 use super::tap::Tap;
 use super::theme::{Fonts, TextStyle, palette, side_color};
-use super::widgets::{
-    self, ButtonColors, ButtonLabel, SettingText, ShownIf, spawn_choice, spawn_option,
-};
+use super::widgets::{self, ButtonColors, ButtonLabel, ShownIf, spawn_choice, spawn_option};
 use super::{Overlay, Screen};
 use crate::play::{Match, Player};
 use crate::settings::{BoardSize, Opponent, Settings};
@@ -595,8 +593,6 @@ fn show_score(
 
 // --- the next game ---
 
-const BOT_NOTE: TextStyle = TextStyle::regular(13.0, palette::MUTED);
-
 /// What the next game is dealt with (see [`crate::settings::Setup`]),
 /// and the button dealing it: a game keeps the setup it was dealt with.
 /// Online, the session seats the players; only the board is chosen.
@@ -616,34 +612,15 @@ fn spawn_next_game(commands: &mut Commands, fonts: &Fonts, sidebar: Entity, onli
             commands,
             fonts,
             opponents,
-            "Someone here",
+            "Human",
             |settings| settings.opponent == Opponent::Human,
             |settings| settings.opponent = Opponent::Human,
         );
-        for bot in BotKind::ALL {
-            spawn_option(
-                commands,
-                fonts,
-                opponents,
-                &format!("{} bot", bot.name()),
-                move |settings| settings.opponent == Opponent::Bot(bot),
-                move |settings| settings.opponent = Opponent::Bot(bot),
-            );
-        }
+        // Bots to choose from are a matter for later: the first one plays.
         let is_bot = |settings: &Settings| matches!(settings.opponent, Opponent::Bot(_));
-        commands.spawn((
-            ShownIf(Box::new(is_bot)),
-            SettingText(Box::new(|settings| match settings.opponent {
-                Opponent::Bot(bot) => bot.description().to_owned(),
-                Opponent::Human => String::new(),
-            })),
-            fonts.text("", BOT_NOTE),
-            Node {
-                margin: UiRect::top(px(-6)),
-                ..default()
-            },
-            ChildOf(card),
-        ));
+        spawn_option(commands, fonts, opponents, "Bot", is_bot, |settings| {
+            settings.opponent = Opponent::Bot(BotKind::ALL[0])
+        });
         let (sides, options) = spawn_choice(commands, fonts, card, "You play");
         commands.entity(sides).insert(ShownIf(Box::new(is_bot)));
         for side in Side::ALL {

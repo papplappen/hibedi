@@ -19,8 +19,7 @@ pub fn plugin(app: &mut App) {
             show_controls.run_if(
                 resource_changed::<Settings>
                     .or_eager(any_match_filter::<Added<Control>>)
-                    .or_eager(any_match_filter::<Added<ShownIf>>)
-                    .or_eager(any_match_filter::<Added<SettingText>>),
+                    .or_eager(any_match_filter::<Added<ShownIf>>),
             ),
         )
             .before(Animate),
@@ -107,10 +106,6 @@ enum Look {
 /// Shows a node only while the settings say so.
 #[derive(Component)]
 pub struct ShownIf(pub Box<dyn Fn(&Settings) -> bool + Send + Sync>);
-
-/// A text that says something about the settings.
-#[derive(Component)]
-pub struct SettingText(pub Box<dyn Fn(&Settings) -> String + Send + Sync>);
 
 const OPTION: TextStyle = TextStyle::bold(14.0, palette::TEXT);
 const CHOICE_LABEL: TextStyle = TextStyle::bold(12.0, palette::MUTED);
@@ -246,14 +241,13 @@ pub fn spawn_switch(
     switch
 }
 
-/// Shows every control, and what depends on the settings, as they
-/// stand.
+/// Shows every control, and the nodes shown only for some settings, as
+/// the settings stand.
 fn show_controls(
     mut commands: Commands,
     settings: Res<Settings>,
     controls: Query<(Entity, &Control)>,
     mut shown: Query<(&ShownIf, &mut Node), Without<Control>>,
-    mut texts: Query<(&SettingText, &mut Text)>,
 ) {
     for (ShownIf(condition), mut node) in &mut shown {
         let display = if condition(&settings) {
@@ -263,12 +257,6 @@ fn show_controls(
         };
         if node.display != display {
             node.display = display;
-        }
-    }
-    for (SettingText(say), mut text) in &mut texts {
-        let said = say(&settings);
-        if text.0 != said {
-            text.0 = said;
         }
     }
     for (entity, control) in &controls {
