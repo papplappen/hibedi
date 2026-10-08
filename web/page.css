@@ -21,8 +21,10 @@ body {
   height: 100dvh;
 }
 
+/* Touches are the game's: no scrolling or zooming the page. */
 #glcanvas {
   display: block;
+  touch-action: none;
 }
 
 #page {

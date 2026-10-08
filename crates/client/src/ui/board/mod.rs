@@ -727,7 +727,7 @@ fn tap_cell(tap: On<Tap>, cells: Query<&BoardCell>, mut play: ResMut<Match>) {
 struct SketchMark;
 
 /// Draws the sketch's lines over the board, each ending in a dot; the
-/// line being drawn shows fainter.
+/// line being drawn shows as a pale preview.
 fn show_sketch(
     mut commands: Commands,
     sketch: Res<Sketch>,
@@ -742,7 +742,7 @@ fn show_sketch(
     let drawing = sketch.drawing.map(|line| {
         (
             line,
-            palette::SKETCH.with_alpha(palette::SKETCH.alpha() * 0.6),
+            palette::SKETCH.with_alpha(palette::SKETCH.alpha() * 0.45),
         )
     });
     for (line, color) in lines.chain(drawing) {

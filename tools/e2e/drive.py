@@ -2,6 +2,7 @@
 
 Commands, run in order (coordinates in window pixels):
   wait                  until the client's window is up
+  move:X:Y              move the pointer
   click:X:Y             left click
   rclick:X:Y            right click
   drag:X1:Y1:X2:Y2      right-drag (sketches a line)
@@ -69,6 +70,8 @@ for command in sys.argv[1:]:
         win = window()
     if op == 'wait':
         time.sleep(1.5)  # the first frames
+    elif op == 'move':
+        at(*map(int, args))
     elif op in ('click', 'rclick'):
         x, y = map(int, args)
         at(x, y)

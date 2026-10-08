@@ -145,7 +145,8 @@ pub fn spawn_sidebar(
     spawn_replay_button(&mut commands, &fonts, sidebar);
     commands.spawn((
         fonts.text(
-            "Right-drag across cells to try a jump out; click to clear.\n\
+            "Right-drag across cells, or right-click its ends, to try a \
+             jump out; click to clear.\n\
              Keys: those in the cell corners; Esc takes back the token \
              chosen before it hops; F2 deals a new game.",
             HELP,

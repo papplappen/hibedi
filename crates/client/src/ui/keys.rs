@@ -7,7 +7,7 @@
 //! like AZERTY), letters as the layout types them, matching the labels.
 //! Esc takes back the token chosen to jump, placed or activated, before
 //! its first hop; F2 deals a new game, and so does Enter once a game is
-//! over.
+//! over. Keys held with Ctrl, Alt or Super are left to the system.
 
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
@@ -48,6 +48,7 @@ pub fn label(actions: &[Action]) -> impl Iterator<Item = (char, Action)> + '_ {
 
 fn play_by_keyboard(
     mut presses: MessageReader<KeyboardInput>,
+    held: Res<ButtonInput<KeyCode>>,
     overlay: Res<State<Overlay>>,
     settings: Res<Settings>,
     mut play: ResMut<Match>,
@@ -58,8 +59,18 @@ fn play_by_keyboard(
         presses.clear();
         return;
     }
+    // Keys with Ctrl, Alt or Super are shortcuts of the system or the
+    // browser, not the game's.
+    let shortcut = held.any_pressed([
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+        KeyCode::AltLeft,
+        KeyCode::AltRight,
+        KeyCode::SuperLeft,
+        KeyCode::SuperRight,
+    ]);
     for press in presses.read() {
-        if press.state != ButtonState::Pressed || press.repeat {
+        if press.state != ButtonState::Pressed || press.repeat || shortcut {
             continue;
         }
         let over = play.game().is_some_and(|game| game.result().is_some());

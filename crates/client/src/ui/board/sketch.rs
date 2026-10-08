@@ -1,6 +1,10 @@
-//! Sketching moves, to try them out without making them: dragging with
-//! the right mouse button draws a line along a row or column, and the
-//! cells under it show flipped, as a jump along it would leave them.
+//! Sketching moves, to try them out without making them: the right mouse
+//! button draws a line along a row or column, and the cells under it
+//! show flipped, as a jump along it would leave them. A line is dragged
+//! out (press, move, let go), or clicked out (click where it starts,
+//! click where it ends); either way a pale preview follows the pointer
+//! until it ends.
+//!
 //! Lines add up: a cell under two of them flips back. Drawing a line
 //! again erases it; a left click, or any change to the game, clears the
 //! sketch. The board shows it; only the game counts.
@@ -28,7 +32,7 @@ pub fn plugin(app: &mut App) {
 #[derive(Resource, Default)]
 pub struct Sketch {
     pub lines: Vec<Line>,
-    /// The line being dragged out.
+    /// The line being drawn, from where it started to the pointer.
     pub drawing: Option<Line>,
 }
 
@@ -69,8 +73,12 @@ fn draw(
     grid: Option<Single<(&BoardGrid, &ComputedNode, &UiGlobalTransform)>>,
     mut sketch: ResMut<Sketch>,
 ) {
-    if mouse.just_pressed(MouseButton::Left) && !sketch.lines.is_empty() {
+    // Read before writing: writing marks the sketch changed.
+    if mouse.just_pressed(MouseButton::Left)
+        && (!sketch.lines.is_empty() || sketch.drawing.is_some())
+    {
         sketch.lines.clear();
+        sketch.drawing = None;
     }
 
     // Where the pointer is on the grid, in logical pixels. UI nodes are
@@ -80,12 +88,6 @@ fn draw(
         let at = node.normalize_point(*transform, window.physical_cursor_position()?)? + 0.5;
         Some((grid, at * grid.size()))
     });
-
-    if mouse.just_pressed(MouseButton::Right)
-        && let Some(from) = pointer.and_then(|(grid, at)| grid.cell_at(at))
-    {
-        sketch.drawing = Some(Line { from, to: from });
-    }
 
     // The line follows the pointer along the row or the column, whichever
     // is closer.
@@ -104,15 +106,37 @@ fn draw(
         }
     }
 
-    // Read before writing: writing marks the sketch changed.
-    if !mouse.pressed(MouseButton::Right)
-        && let Some(line) = sketch.drawing
-    {
-        sketch.drawing = None;
-        if let Some(index) = sketch.lines.iter().position(|&drawn| drawn == line) {
-            sketch.lines.remove(index);
-        } else {
-            sketch.lines.push(line);
+    if mouse.just_pressed(MouseButton::Right) {
+        match sketch.drawing {
+            // A second click ends a clicked line.
+            Some(line) => finish(&mut sketch, line),
+            None => {
+                if let Some(from) = pointer.and_then(|(grid, at)| grid.cell_at(at)) {
+                    sketch.drawing = Some(Line { from, to: from });
+                }
+            }
         }
+    }
+    // Let go away from where it started, a line was dragged out: it ends
+    // there. Let go where it started, it was a click: it goes on.
+    if mouse.just_released(MouseButton::Right)
+        && let Some(line) = sketch.drawing
+        && line.to != line.from
+    {
+        finish(&mut sketch, line);
+    }
+}
+
+/// Ends the line being drawn: it toggles, unless it never left its
+/// first cell.
+fn finish(sketch: &mut Sketch, line: Line) {
+    sketch.drawing = None;
+    if line.from == line.to {
+        return;
+    }
+    if let Some(index) = sketch.lines.iter().position(|&drawn| drawn == line) {
+        sketch.lines.remove(index);
+    } else {
+        sketch.lines.push(line);
     }
 }

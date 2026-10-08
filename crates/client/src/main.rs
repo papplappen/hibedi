@@ -131,6 +131,11 @@ fn window() -> Window {
         // On the web: the page's canvas, filling the body (page.css).
         canvas: Some("#glcanvas".to_owned()),
         fit_canvas_to_parent: true,
+        // Keys keep their browser defaults (Ctrl+2 still switches tabs);
+        // the page blocks only what the game uses itself: the context
+        // menu (right-clicks sketch) and touch gestures (web/game.js,
+        // page.css).
+        prevent_default_event_handling: false,
         ..default()
     }
 }

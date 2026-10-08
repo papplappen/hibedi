@@ -58,6 +58,10 @@ export async function startGame(session) {
   // diagnosable (different build: stale tab; different ratio: zoom).
   const { glue, wasm } = window.HIBEDI_BUILD
   console.log(`hibedi: ${wasm} (devicePixelRatio ${window.devicePixelRatio})`)
+  // Right-clicks sketch moves on the board, so no context menu there.
+  // (The game leaves every other browser default alone.)
+  document.getElementById('glcanvas').addEventListener('contextmenu', (event) => event.preventDefault())
+
   const game = await import(glue)
   await game.default({ module_or_path: wasm })
   document.getElementById('glcanvas').focus()
