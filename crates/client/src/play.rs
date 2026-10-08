@@ -18,16 +18,12 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use crate::session::Session;
-use crate::settings::{BoardSize, Opponent, Settings};
+use crate::settings::{Opponent, Settings, Setup};
 
 pub fn plugin(app: &mut App) {
     app.add_systems(
         PreUpdate,
-        (
-            follow_settings.run_if(resource_changed::<Settings>),
-            sync_session,
-            play_bots,
-        )
+        (sync_session, play_bots)
             .chain()
             .run_if(resource_exists::<Match>),
     );
@@ -35,12 +31,6 @@ pub fn plugin(app: &mut App) {
 
 /// Seconds a bot waits before each action, so its moves can be followed.
 const BOT_PAUSE: f32 = 0.6;
-
-fn follow_settings(settings: Res<Settings>, mut play: ResMut<Match>) {
-    if play.bypass_change_detection().configure(&settings) {
-        play.set_changed();
-    }
-}
 
 /// Pulls in what the session received, marking the match changed only
 /// if anything did.
@@ -78,32 +68,28 @@ pub struct Match {
     game: Option<Game>,
     /// Per side, in [`Side::ALL`] order.
     players: [Player; 2],
-    /// Who plays a game on this device, as last configured.
-    local: Option<(Opponent, Side)>,
+    /// What the game was dealt with (online, only its board counts).
+    setup: Setup,
     session: Option<Box<dyn Session>>,
     /// Whether the other player is connected, as of the last update;
     /// `None` without a session.
     opponent_online: Option<bool>,
-    /// The boards dealt, and the dealer's randomness.
-    deal: BoardSize,
+    /// The dealer's randomness.
     rng: StdRng,
 }
 
 impl Match {
-    /// A game on this device, against whoever the settings say.
+    /// A game on this device, dealt as the settings say.
     pub fn local(settings: &Settings) -> Self {
         let mut play = Self {
             game: None,
             players: [Player::Here, Player::Here],
-            local: None,
+            setup: settings.setup(),
             session: None,
             opponent_online: None,
-            deal: settings.board,
             rng: StdRng::from_rng(&mut rand::rng()),
         };
-        play.configure(settings);
-        let game = play.new_game();
-        play.set_game(game);
+        play.deal(settings.setup());
         play
     }
 
@@ -113,8 +99,7 @@ impl Match {
     pub fn with_seed(mut self, seed: Option<u64>) -> Self {
         if let Some(seed) = seed {
             self.rng = StdRng::seed_from_u64(seed);
-            let game = self.new_game();
-            self.set_game(game);
+            self.deal(self.setup);
         }
         self
     }
@@ -142,16 +127,14 @@ impl Match {
                     Player::Remote
                 }
             }),
-            local: None,
+            setup: settings.setup(),
             opponent_online: Some(session.everyone_online()),
             session: Some(session),
-            deal: settings.board,
             rng: StdRng::from_rng(&mut rand::rng()),
         };
         play.adopt_received();
         if play.game.is_none() && mine == Side::ALL[0] {
-            let game = play.new_game();
-            play.set_game(game);
+            play.deal(settings.setup());
         }
         play
     }
@@ -219,27 +202,30 @@ impl Match {
         }
     }
 
-    pub fn start_new_game(&mut self) {
+    /// What the game was dealt with.
+    pub fn setup(&self) -> Setup {
+        self.setup
+    }
+
+    /// Deals a new game with `setup`, if one may start.
+    pub fn start_new_game(&mut self, setup: Setup) {
         if self.can_start_new_game() {
-            let game = self.new_game();
-            self.set_game(game);
+            self.deal(setup);
         }
     }
 
-    /// Follows the settings: the boards dealt, and, on this device, who
-    /// plays which side. Returns whether the players changed.
-    pub fn configure(&mut self, settings: &Settings) -> bool {
-        self.deal = settings.board;
-        let setup = (settings.opponent, settings.side);
-        if self.session.is_some() || self.local == Some(setup) {
-            return false;
+    /// Deals a game with `setup`: its board, and, on this device, who
+    /// plays which side. Online, the seats stay as the session has them.
+    fn deal(&mut self, setup: Setup) {
+        self.setup = setup;
+        if self.session.is_none() {
+            self.players = Side::ALL.map(|side| match setup.opponent {
+                Opponent::Bot(bot) if side != setup.side => Player::Bot(bot.build()),
+                _ => Player::Here,
+            });
         }
-        self.local = Some(setup);
-        self.players = Side::ALL.map(|side| match settings.opponent {
-            Opponent::Bot(bot) if side != settings.side => Player::Bot(bot.build()),
-            _ => Player::Here,
-        });
-        true
+        let game = Game::new_random(setup.board.width, setup.board.height, &mut self.rng);
+        self.set_game(game);
     }
 
     /// Pulls in what the session received and takes steps that need no
@@ -368,10 +354,6 @@ impl Match {
             return true;
         }
         false
-    }
-
-    fn new_game(&mut self) -> Game {
-        Game::new_random(self.deal.width, self.deal.height, &mut self.rng)
     }
 
     fn set_game(&mut self, game: Game) {

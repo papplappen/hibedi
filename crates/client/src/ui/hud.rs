@@ -4,15 +4,19 @@
 //! while there is no game yet.
 
 use bevy::prelude::*;
+use hibedi_bots::BotKind;
 use hibedi_core::{Game, GameResult, Phase, Side, WinReason};
 
 use super::anim::{Animate, ScaleTo};
 use super::layout::{Content, HeaderEnd, Sidebar, WIDE_CARD_W};
 use super::tap::Tap;
 use super::theme::{Fonts, TextStyle, palette, side_color};
-use super::widgets::{self, ButtonColors, ButtonLabel};
+use super::widgets::{
+    self, ButtonColors, ButtonLabel, SettingText, ShownIf, spawn_choice, spawn_option,
+};
 use super::{Overlay, Screen};
 use crate::play::{Match, Player};
+use crate::settings::{BoardSize, Opponent, Settings};
 use crate::storage;
 
 pub fn plugin(app: &mut App) {
@@ -20,14 +24,12 @@ pub fn plugin(app: &mut App) {
         Update,
         (
             show_notice.run_if(resource_changed::<Notice>),
-            (
-                show_presence,
-                show_score,
-                show_turn,
-                show_new_game,
-                show_replay,
-            )
+            (show_presence, show_score, show_turn, show_replay)
                 .run_if(in_state(Screen::Playing).and_then(resource_changed::<Match>)),
+            show_new_game.run_if(
+                in_state(Screen::Playing)
+                    .and_then(resource_changed::<Match>.or_eager(resource_changed::<Settings>)),
+            ),
         )
             .before(Animate),
     );
@@ -119,11 +121,13 @@ pub fn spawn(
     ));
 }
 
-/// The sidebar: score, turn card, the new-game and replay buttons and a
-/// word on the controls beyond clicking.
+/// The sidebar: score, turn card, the next game's setup with the button
+/// dealing it, the replay button and a word on the controls beyond
+/// clicking.
 pub fn spawn_sidebar(
     mut commands: Commands,
     fonts: Res<Fonts>,
+    play: Res<Match>,
     content: Single<Entity, With<Content>>,
 ) {
     let sidebar = commands
@@ -132,7 +136,12 @@ pub fn spawn_sidebar(
     spawn_score(&mut commands, &fonts, sidebar);
     let turn = spawn_text_card(&mut commands, &fonts, sidebar);
     commands.entity(turn).insert(TurnCard);
-    spawn_new_game_button(&mut commands, &fonts, sidebar);
+    spawn_next_game(
+        &mut commands,
+        &fonts,
+        sidebar,
+        play.opponent_online().is_some(),
+    );
     spawn_replay_button(&mut commands, &fonts, sidebar);
     commands.spawn((
         fonts.text(
@@ -584,6 +593,92 @@ fn show_score(
     }
 }
 
+// --- the next game ---
+
+const BOT_NOTE: TextStyle = TextStyle::regular(13.0, palette::MUTED);
+
+/// What the next game is dealt with (see [`crate::settings::Setup`]),
+/// and the button dealing it: a game keeps the setup it was dealt with.
+/// Online, the session seats the players; only the board is chosen.
+fn spawn_next_game(commands: &mut Commands, fonts: &Fonts, sidebar: Entity, online: bool) {
+    let card = commands
+        .spawn((
+            card(Node {
+                row_gap: px(14),
+                ..card_node()
+            }),
+            ChildOf(sidebar),
+        ))
+        .id();
+    if !online {
+        let (_, opponents) = spawn_choice(commands, fonts, card, "Play against");
+        spawn_option(
+            commands,
+            fonts,
+            opponents,
+            "Someone here",
+            |settings| settings.opponent == Opponent::Human,
+            |settings| settings.opponent = Opponent::Human,
+        );
+        for bot in BotKind::ALL {
+            spawn_option(
+                commands,
+                fonts,
+                opponents,
+                &format!("{} bot", bot.name()),
+                move |settings| settings.opponent == Opponent::Bot(bot),
+                move |settings| settings.opponent = Opponent::Bot(bot),
+            );
+        }
+        let is_bot = |settings: &Settings| matches!(settings.opponent, Opponent::Bot(_));
+        commands.spawn((
+            ShownIf(Box::new(is_bot)),
+            SettingText(Box::new(|settings| match settings.opponent {
+                Opponent::Bot(bot) => bot.description().to_owned(),
+                Opponent::Human => String::new(),
+            })),
+            fonts.text("", BOT_NOTE),
+            Node {
+                margin: UiRect::top(px(-6)),
+                ..default()
+            },
+            ChildOf(card),
+        ));
+        let (sides, options) = spawn_choice(commands, fonts, card, "You play");
+        commands.entity(sides).insert(ShownIf(Box::new(is_bot)));
+        for side in Side::ALL {
+            let option = spawn_option(
+                commands,
+                fonts,
+                options,
+                &side.to_string(),
+                move |settings| settings.side == side,
+                move |settings| settings.side = side,
+            );
+            commands.spawn((
+                Node {
+                    margin: UiRect::left(px(8)),
+                    ..swatch(SWATCH)
+                },
+                BackgroundColor(side_color(side)),
+                ChildOf(option),
+            ));
+        }
+    }
+    let (_, sizes) = spawn_choice(commands, fonts, card, "Board size");
+    for size in BoardSize::ALL {
+        spawn_option(
+            commands,
+            fonts,
+            sizes,
+            &format!("{}×{}", size.width, size.height),
+            move |settings| settings.board == size,
+            move |settings| settings.board = size,
+        );
+    }
+    spawn_new_game_button(commands, fonts, card);
+}
+
 // --- new game ---
 
 #[derive(Component)]
@@ -609,20 +704,27 @@ fn spawn_new_game_button(commands: &mut Commands, fonts: &Fonts, sidebar: Entity
             Visibility::Hidden,
             ChildOf(sidebar),
         ))
-        .observe(|_: On<Tap>, mut play: ResMut<Match>| play.start_new_game());
+        .observe(
+            |_: On<Tap>, mut play: ResMut<Match>, settings: Res<Settings>| {
+                play.start_new_game(settings.setup());
+            },
+        );
 }
 
-/// Hotseat may restart any time; once a game is over, the button turns
-/// gold (with dark text: light text lacks contrast against it).
+/// Hotseat may restart any time. Once a game is over, or a new setup
+/// waits for its game, the button turns gold (with dark text: light text
+/// lacks contrast against it).
 fn show_new_game(
     mut commands: Commands,
     play: Res<Match>,
+    settings: Res<Settings>,
     button: Single<(Entity, &Visibility, &Children), With<NewGameButton>>,
     labels: Query<(), With<ButtonLabel>>,
 ) {
     let (entity, visibility, children) = *button;
     let shown = play.can_start_new_game();
-    let primary = play.game().is_some_and(|game| game.result().is_some());
+    let primary =
+        play.game().is_some_and(|game| game.result().is_some()) || play.setup() != settings.setup();
     let (color, text) = if primary {
         (palette::GOLD, palette::BACKGROUND)
     } else {

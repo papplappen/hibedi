@@ -24,7 +24,7 @@ pub fn plugin(app: &mut App) {
 #[derive(Resource, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// The boards dealt, from the next game on.
+    /// The boards dealt.
     pub board: BoardSize,
     /// Who plays the other side in games on this device.
     pub opponent: Opponent,
@@ -46,7 +46,24 @@ impl Default for Settings {
     }
 }
 
+/// What a game is dealt with: the board, and who plays it. A game keeps
+/// the setup it was dealt with; a new setup takes a new game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Setup {
+    pub board: BoardSize,
+    pub opponent: Opponent,
+    pub side: Side,
+}
+
 impl Settings {
+    pub fn setup(&self) -> Setup {
+        Setup {
+            board: self.board,
+            opponent: self.opponent,
+            side: self.side,
+        }
+    }
+
     /// The settings kept on the device; the defaults for anything
     /// missing or unreadable.
     pub fn load() -> Self {

@@ -16,6 +16,7 @@ use hibedi_core::Action;
 
 use super::{Overlay, Screen};
 use crate::play::Match;
+use crate::settings::Settings;
 
 pub fn plugin(app: &mut App) {
     app.add_systems(
@@ -48,6 +49,7 @@ pub fn label(actions: &[Action]) -> impl Iterator<Item = (char, Action)> + '_ {
 fn play_by_keyboard(
     mut presses: MessageReader<KeyboardInput>,
     overlay: Res<State<Overlay>>,
+    settings: Res<Settings>,
     mut play: ResMut<Match>,
 ) {
     // Keys pressed while something covers the board are not for it
@@ -63,11 +65,11 @@ fn play_by_keyboard(
         let over = play.game().is_some_and(|game| game.result().is_some());
         let action = match press.key_code {
             KeyCode::F2 => {
-                play.start_new_game();
+                play.start_new_game(settings.setup());
                 continue;
             }
             KeyCode::Enter | KeyCode::NumpadEnter if over => {
-                play.start_new_game();
+                play.start_new_game(settings.setup());
                 continue;
             }
             KeyCode::Escape => Some(Action::TakeBack),

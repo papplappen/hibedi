@@ -16,8 +16,12 @@ pub fn plugin(app: &mut App) {
         Update,
         (
             hover_buttons,
-            show_controls
-                .run_if(resource_changed::<Settings>.or_eager(any_match_filter::<Added<Control>>)),
+            show_controls.run_if(
+                resource_changed::<Settings>
+                    .or_eager(any_match_filter::<Added<Control>>)
+                    .or_eager(any_match_filter::<Added<ShownIf>>)
+                    .or_eager(any_match_filter::<Added<SettingText>>),
+            ),
         )
             .before(Animate),
     );
@@ -100,7 +104,16 @@ enum Look {
     Switch { knob: Entity },
 }
 
+/// Shows a node only while the settings say so.
+#[derive(Component)]
+pub struct ShownIf(pub Box<dyn Fn(&Settings) -> bool + Send + Sync>);
+
+/// A text that says something about the settings.
+#[derive(Component)]
+pub struct SettingText(pub Box<dyn Fn(&Settings) -> String + Send + Sync>);
+
 const OPTION: TextStyle = TextStyle::bold(14.0, palette::TEXT);
+const CHOICE_LABEL: TextStyle = TextStyle::bold(12.0, palette::MUTED);
 const OPTION_H: f32 = 34.0;
 const SWITCH_W: f32 = 44.0;
 const SWITCH_H: f32 = 24.0;
@@ -112,6 +125,40 @@ fn tap_control(tap: On<Tap>, controls: Query<&Control>, mut settings: ResMut<Set
         (control.tap)(&mut changed);
         settings.set_if_neq(changed);
     }
+}
+
+/// A labeled choice: the label above, then the options (wrapping onto
+/// further lines as needed). Returns the choice and the options'
+/// container, for [`spawn_option`]s.
+pub fn spawn_choice(
+    commands: &mut Commands,
+    fonts: &Fonts,
+    parent: Entity,
+    label: &str,
+) -> (Entity, Entity) {
+    let choice = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(6),
+                ..default()
+            },
+            ChildOf(parent),
+        ))
+        .id();
+    commands.spawn((fonts.text(label, CHOICE_LABEL), ChildOf(choice)));
+    let options = commands
+        .spawn((
+            Node {
+                flex_wrap: FlexWrap::Wrap,
+                column_gap: px(6),
+                row_gap: px(6),
+                ..default()
+            },
+            ChildOf(choice),
+        ))
+        .id();
+    (choice, options)
 }
 
 /// An option among others, chosen when `on` holds; tapping it calls
@@ -130,7 +177,9 @@ pub fn spawn_option(
             Tappable,
             Node {
                 height: px(OPTION_H),
-                padding: UiRect::horizontal(px(12)),
+                // Options share their row evenly.
+                flex_grow: 1.0,
+                padding: UiRect::horizontal(px(8)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 border: UiRect::all(px(1)),
@@ -197,12 +246,31 @@ pub fn spawn_switch(
     switch
 }
 
-/// Shows every control as the settings stand.
+/// Shows every control, and what depends on the settings, as they
+/// stand.
 fn show_controls(
     mut commands: Commands,
     settings: Res<Settings>,
     controls: Query<(Entity, &Control)>,
+    mut shown: Query<(&ShownIf, &mut Node), Without<Control>>,
+    mut texts: Query<(&SettingText, &mut Text)>,
 ) {
+    for (ShownIf(condition), mut node) in &mut shown {
+        let display = if condition(&settings) {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != display {
+            node.display = display;
+        }
+    }
+    for (SettingText(say), mut text) in &mut texts {
+        let said = say(&settings);
+        if text.0 != said {
+            text.0 = said;
+        }
+    }
     for (entity, control) in &controls {
         let on = (control.on)(&settings);
         match control.look {

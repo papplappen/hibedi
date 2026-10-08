@@ -13,7 +13,7 @@ mod sketch;
 mod view;
 
 use bevy::prelude::*;
-use hibedi_core::{Cell, Coord, GameResult};
+use hibedi_core::{Cell, Coord, Game, GameResult};
 
 use super::Screen;
 use super::anim::{Animate, Bounce, ColorTo, FaceSymbol, Flip, Hop, Pulse, ScaleTo, show_face};
@@ -63,13 +63,21 @@ pub struct BoardFrame;
 
 /// The grid of cells inside the frame; tokens are positioned on it in
 /// percent of its size.
-#[derive(Component)]
+#[derive(Component, PartialEq)]
 struct BoardGrid {
     columns: usize,
     rows: usize,
 }
 
 impl BoardGrid {
+    /// The grid a game's board needs: its cells, outer ring included.
+    fn of(game: &Game) -> Self {
+        Self {
+            columns: game.board().storage_width(),
+            rows: game.board().storage_height(),
+        }
+    }
+
     /// The `left`/`top` of a cell, in percent of the grid.
     fn position(&self, coord: Coord) -> Vec2 {
         vec2(
@@ -129,13 +137,6 @@ pub fn spawn(
     theme: Res<Theme>,
     content: Single<Entity, With<Content>>,
 ) {
-    let game = play.game().expect("a game is being played");
-    let view = BoardView::of(game, viewer(&play));
-    let grid = BoardGrid {
-        columns: game.board().storage_width(),
-        rows: game.board().storage_height(),
-    };
-
     let frame = commands
         .spawn((
             BoardFrame,
@@ -149,6 +150,16 @@ pub fn spawn(
             ChildOf(*content),
         ))
         .id();
+    build_grid(&mut commands, &fonts, &theme, frame, &play);
+}
+
+/// Builds the grid of the match's game in the frame, growing in with a
+/// wave: the board's structure (its cells) follows the game's
+/// dimensions; everything else follows changes ([`follow_match`]).
+fn build_grid(commands: &mut Commands, fonts: &Fonts, theme: &Theme, frame: Entity, play: &Match) {
+    let game = play.game().expect("a game is being played");
+    let view = BoardView::of(game, viewer(play));
+    let grid = BoardGrid::of(game);
     let grid_entity = commands
         .spawn((
             Node {
@@ -164,12 +175,12 @@ pub fn spawn(
         .id();
 
     for cell in &view.cells {
-        spawn_cell(&mut commands, &fonts, &theme, grid_entity, cell);
+        spawn_cell(commands, fonts, theme, grid_entity, cell);
     }
     for token in &view.tokens {
         spawn_token(
-            &mut commands,
-            &theme,
+            commands,
+            theme,
             grid_entity,
             &grid,
             token,
@@ -407,12 +418,14 @@ fn centered(size: f32) -> Node {
 }
 
 /// Brings the board up to date with the match and the sketch, animating
-/// every change.
+/// every change. A game of other dimensions gets a grid of its own.
 fn follow_match(
     mut commands: Commands,
     play: Res<Match>,
     sketch: Res<Sketch>,
     theme: Res<Theme>,
+    fonts: Res<Fonts>,
+    frame: Single<Entity, With<BoardFrame>>,
     grid: Single<(Entity, &BoardGrid)>,
     mut cells: Query<(Entity, &mut BoardCell, &CellParts)>,
     tokens: Query<(Entity, &BoardToken, &TokenParts, &Node)>,
@@ -421,8 +434,18 @@ fn follow_match(
     let Some(game) = play.game() else {
         return;
     };
-    let view = BoardView::of(game, viewer(&play));
     let (grid_entity, grid) = *grid;
+    if *grid != BoardGrid::of(game) {
+        commands.entity(grid_entity).despawn();
+        build_grid(&mut commands, &fonts, &theme, *frame, &play);
+        *shown = Shown {
+            result: game.result(),
+            lines: sketch.lines.clone(),
+            theme: Some(theme.kind),
+        };
+        return;
+    }
+    let view = BoardView::of(game, viewer(&play));
 
     // Tokens first: where they hop decides when the cells they cross
     // flip. Lines drawn or erased sweep over their cells the same way.
