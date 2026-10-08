@@ -11,13 +11,15 @@ use hibedi_core::{Coord, Game};
 
 use super::BoardGrid;
 use crate::play::Match;
+use crate::ui::Overlay;
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<Sketch>().add_systems(
         PreUpdate,
         (
             clear_on_change.run_if(resource_changed::<Match>),
-            draw.after(bevy::input::InputSystems),
+            draw.after(bevy::input::InputSystems)
+                .run_if(in_state(Overlay::None)),
         )
             .chain(),
     );

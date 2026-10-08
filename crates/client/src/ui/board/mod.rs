@@ -16,11 +16,12 @@ use bevy::prelude::*;
 use hibedi_core::{Cell, Coord, GameResult};
 
 use super::Screen;
-use super::anim::{Animate, Bounce, ColorTo, Flip, Hop, Pulse, ScaleTo};
+use super::anim::{Animate, Bounce, ColorTo, FaceSymbol, Flip, Hop, Pulse, ScaleTo, show_face};
 use super::layout::Content;
 use super::tap::{Tap, Tappable};
-use super::theme::{Fonts, TextStyle, palette, side_color};
+use super::theme::{Fonts, TextStyle, Theme, palette};
 use crate::play::Match;
+use crate::settings::ThemeKind;
 use sketch::{Line, Sketch};
 use view::{BoardView, CellView, Halo, Hint, TokenView, Viewer};
 
@@ -28,7 +29,11 @@ pub fn plugin(app: &mut App) {
     app.add_plugins(sketch::plugin).add_systems(
         Update,
         (
-            follow_match.run_if(resource_changed::<Match>.or_eager(resource_changed::<Sketch>)),
+            follow_match.run_if(
+                resource_changed::<Match>
+                    .or_eager(resource_changed::<Sketch>)
+                    .or_eager(resource_changed::<Theme>),
+            ),
             show_sketch.run_if(resource_changed::<Sketch>),
             size_keys,
         )
@@ -46,6 +51,8 @@ const HOP_BASE: f32 = 0.16;
 const HOP_PER_CELL: f32 = 0.07;
 /// Key labels' size, in cells.
 const KEY_SIZE: f32 = 0.16;
+/// A face's symbol's size, in percent of its cell.
+const SYMBOL_SIZE: f32 = 80.0;
 /// Sketched lines' thickness, and the dot at their end, in cells.
 const SKETCH_LINE: f32 = 0.18;
 const SKETCH_DOT: f32 = 0.4;
@@ -88,7 +95,8 @@ struct BoardCell {
     shown: Cell,
 }
 
-/// A cell's decorations, bottom to top.
+/// A cell's decorations, bottom to top, over the symbol of its face
+/// ([`FaceSymbol`]).
 #[derive(Component)]
 struct CellParts {
     /// Dims crossed cells.
@@ -118,6 +126,7 @@ pub fn spawn(
     mut commands: Commands,
     play: Res<Match>,
     fonts: Res<Fonts>,
+    theme: Res<Theme>,
     content: Single<Entity, With<Content>>,
 ) {
     let game = play.game().expect("a game is being played");
@@ -155,11 +164,12 @@ pub fn spawn(
         .id();
 
     for cell in &view.cells {
-        spawn_cell(&mut commands, &fonts, grid_entity, cell);
+        spawn_cell(&mut commands, &fonts, &theme, grid_entity, cell);
     }
     for token in &view.tokens {
         spawn_token(
             &mut commands,
+            &theme,
             grid_entity,
             &grid,
             token,
@@ -178,7 +188,13 @@ fn viewer(play: &Match) -> Viewer {
     }
 }
 
-fn spawn_cell(commands: &mut Commands, fonts: &Fonts, grid: Entity, view: &CellView) {
+fn spawn_cell(
+    commands: &mut Commands,
+    fonts: &Fonts,
+    theme: &Theme,
+    grid: Entity,
+    view: &CellView,
+) {
     let cell = commands
         .spawn((
             BoardCell {
@@ -190,7 +206,6 @@ fn spawn_cell(commands: &mut Commands, fonts: &Fonts, grid: Entity, view: &CellV
                 border_radius: BorderRadius::all(percent(8)),
                 ..default()
             },
-            BackgroundColor(cell_color(view.cell)),
             ScaleTo::appear(wave_delay(view.coord)),
             Tappable,
             ChildOf(grid),
@@ -198,6 +213,7 @@ fn spawn_cell(commands: &mut Commands, fonts: &Fonts, grid: Entity, view: &CellV
         .observe(tap_cell)
         .id();
     let mut part = |node: Node| commands.spawn((node, ChildOf(cell))).id();
+    let symbol = part(centered(SYMBOL_SIZE));
     let overlay = part(Node {
         border_radius: BorderRadius::all(percent(8)),
         ..centered(100.0)
@@ -234,10 +250,9 @@ fn spawn_cell(commands: &mut Commands, fonts: &Fonts, grid: Entity, view: &CellV
             ChildOf(cell),
         ))
         .id();
-    commands
-        .entity(frame)
-        .insert(BorderColor::all(palette::OWN_EDGE));
     commands.entity(ring).insert(Pulse { amount: 0.06 });
+    let face = show_face(commands, symbol, &theme.face(view.cell));
+    commands.entity(cell).insert((face, FaceSymbol(symbol)));
 
     let parts = CellParts {
         overlay,
@@ -246,19 +261,21 @@ fn spawn_cell(commands: &mut Commands, fonts: &Fonts, grid: Entity, view: &CellV
         dot,
         key,
     };
-    show_cell(commands, &parts, view);
+    show_cell(commands, theme, &parts, view);
     commands.entity(cell).insert(parts);
 }
 
-/// Applies a cell's decorations; its color is the caller's business.
-fn show_cell(commands: &mut Commands, parts: &CellParts, view: &CellView) {
+/// Applies a cell's decorations; its face is the caller's business.
+fn show_cell(commands: &mut Commands, theme: &Theme, parts: &CellParts, view: &CellView) {
     let overlay = if view.used {
         palette::USED_CELL_OVERLAY
     } else {
         Color::NONE
     };
     commands.entity(parts.overlay).insert(ColorTo(overlay));
-    commands.entity(parts.frame).insert(visible_if(view.own));
+    commands
+        .entity(parts.frame)
+        .insert((visible_if(view.own), BorderColor::all(theme.own_edge)));
 
     commands
         .entity(parts.ring)
@@ -276,6 +293,7 @@ fn show_cell(commands: &mut Commands, parts: &CellParts, view: &CellView) {
     commands.entity(parts.key).insert((
         visible_if(key.is_some()),
         Text::new(key.unwrap_or_default()),
+        TextColor(theme.key),
     ));
 }
 
@@ -301,6 +319,7 @@ fn size_keys(
 
 fn spawn_token(
     commands: &mut Commands,
+    theme: &Theme,
     grid_entity: Entity,
     grid: &BoardGrid,
     view: &TokenView,
@@ -334,41 +353,30 @@ fn spawn_token(
         .id();
     let disc = commands
         .spawn((
-            BackgroundColor(if view.spent {
-                palette::SPENT_FILL
-            } else {
-                palette::TOKEN_FILL
-            }),
+            BackgroundColor(theme.stone(view.jumping, view.spent).fill),
             BoxShadow::new(palette::SHADOW, px(0), percent(6), px(0), percent(8)),
             ChildOf(token),
         ))
         .id();
 
     let parts = TokenParts { halo, disc };
-    show_token(commands, &parts, view);
+    show_token(commands, theme, &parts, view);
     commands.entity(token).insert(parts);
 }
 
-/// Applies a token's rim and halo.
-fn show_token(commands: &mut Commands, parts: &TokenParts, view: &TokenView) {
-    // The token jumping wears a thick cyan rim, the others a thin light
-    // one (in percent of the token's cell). Spent tokens fade into the
-    // board.
-    let (rim, rim_color, fill) = if view.jumping {
-        (7.0, palette::CYAN, palette::TOKEN_FILL)
-    } else if view.spent {
-        (3.0, palette::SPENT_EDGE, palette::SPENT_FILL)
-    } else {
-        (3.0, palette::TOKEN_EDGE, palette::TOKEN_FILL)
-    };
+/// Applies a token's disc and halo. The token jumping wears a thick cyan
+/// rim; spent tokens fade into the board.
+fn show_token(commands: &mut Commands, theme: &Theme, parts: &TokenParts, view: &TokenView) {
+    let stone = theme.stone(view.jumping, view.spent);
     commands.entity(parts.disc).insert((
         Node {
-            border: UiRect::all(percent(rim)),
+            border: UiRect::all(percent(stone.rim_width)),
             border_radius: BorderRadius::MAX,
             ..centered(54.0)
         },
-        BorderColor::all(rim_color),
-        ColorTo(fill),
+        BorderColor::all(stone.rim),
+        ColorTo(stone.fill),
+        stone.shading,
     ));
 
     let (visibility, fill, ring) = match view.halo {
@@ -404,6 +412,7 @@ fn follow_match(
     mut commands: Commands,
     play: Res<Match>,
     sketch: Res<Sketch>,
+    theme: Res<Theme>,
     grid: Single<(Entity, &BoardGrid)>,
     mut cells: Query<(Entity, &mut BoardCell, &CellParts)>,
     tokens: Query<(Entity, &BoardToken, &TokenParts, &Node)>,
@@ -437,14 +446,14 @@ fn follow_match(
             ));
         }
         commands.entity(entity).insert(BoardToken { view: *next });
-        show_token(&mut commands, parts, next);
+        show_token(&mut commands, &theme, parts, next);
     }
     for token in &view.tokens {
         if !tokens
             .iter()
             .any(|(_, shown, ..)| shown.view.id == token.id)
         {
-            spawn_token(&mut commands, grid_entity, grid, token, 0.0);
+            spawn_token(&mut commands, &theme, grid_entity, grid, token, 0.0);
         }
     }
 
@@ -466,6 +475,11 @@ fn follow_match(
         )
         .collect();
     shown.lines = sketch.lines.clone();
+    // A new look turns every cell over, in a wave.
+    let new_look = shown
+        .theme
+        .replace(theme.kind)
+        .is_some_and(|kind| kind != theme.kind);
 
     for (entity, mut cell, parts) in &mut cells {
         let Some(next) = view.cells.iter().find(|next| next.coord == cell.coord) else {
@@ -476,14 +490,18 @@ fn follow_match(
         } else {
             next.cell
         };
-        if shown != cell.shown {
+        if shown != cell.shown || new_look {
             cell.shown = shown;
-            let (delay, direction) = flip_timing(cell.coord, &sweeps);
+            let (delay, direction) = if new_look {
+                (wave_delay(cell.coord), Vec2::ZERO)
+            } else {
+                flip_timing(cell.coord, &sweeps)
+            };
             commands
                 .entity(entity)
-                .insert(Flip::to(cell_color(shown), delay, direction));
+                .insert(Flip::to(theme.face(shown), delay, direction));
         }
-        show_cell(&mut commands, parts, next);
+        show_cell(&mut commands, &theme, parts, next);
     }
 
     // A win: the winner's cells bounce, once the last flips settle.
@@ -507,6 +525,7 @@ fn follow_match(
 struct Shown {
     result: Option<GameResult>,
     lines: Vec<Line>,
+    theme: Option<ThemeKind>,
 }
 
 /// A sweep over the board this update: a token's move, or a sketched
@@ -598,10 +617,6 @@ fn position_of(node: &Node) -> Vec2 {
         _ => 0.0,
     };
     vec2(percent(node.left), percent(node.top))
-}
-
-fn cell_color(cell: Cell) -> Color {
-    cell.side().map_or(palette::EMPTY_CELL, side_color)
 }
 
 fn visible_if(visible: bool) -> Visibility {

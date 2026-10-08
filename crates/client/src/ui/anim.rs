@@ -2,9 +2,12 @@
 //! aspect of its node; one-shot animations remove themselves when done.
 //! Views only insert them: inserting one again restarts it.
 //!
+//! The player may switch each kind off in the settings ([`crate::settings::Motion`]):
+//! then it jumps to its end, though a flip still waits for its moment.
+//!
 //! | component   | drives                              |
 //! |-------------|-------------------------------------|
-//! | [`Flip`]    | scale, translation, background      |
+//! | [`Flip`]    | scale, translation, [`Face`]        |
 //! | [`Hop`]     | `left`/`top`, scale                 |
 //! | [`ScaleTo`] | scale                               |
 //! | [`Bounce`]  | vertical translation                |
@@ -15,6 +18,9 @@ use std::f32::consts::{PI, TAU};
 
 use bevy::color::color_difference::EuclideanDistance;
 use bevy::prelude::*;
+
+use super::theme::Face;
+use crate::settings::Settings;
 
 pub fn plugin(app: &mut App) {
     app.add_systems(
@@ -53,19 +59,26 @@ impl Clock {
     }
 }
 
+/// The progress shown: `t`, or the end for animations switched off.
+fn shown(t: f32, on: bool) -> f32 {
+    if on { t } else { 1.0 }
+}
+
 /// Up and back down over the progress `t`: 0 at both ends, 1 halfway.
 fn arc(t: f32) -> f32 {
     (PI * t).sin()
 }
 
-/// Turns a node over like a card, showing the new color from halfway.
+/// Turns a node over like a card, showing the new face from halfway.
 /// Given a direction, the turn runs along it, as if swept over by
 /// something passing: the old face folds away into the front edge, and
 /// the new one unfolds from the back edge.
 #[derive(Component)]
 pub struct Flip {
     clock: Clock,
-    to: Color,
+    to: Face,
+    /// Whether the new face shows yet.
+    turned: bool,
     /// A unit step in screen space (y down), or zero to turn in place.
     direction: Vec2,
 }
@@ -75,27 +88,58 @@ impl Flip {
     /// How much the node grows across the turn halfway through.
     const LIFT: f32 = 0.08;
 
-    pub const fn to(color: Color, delay: f32, direction: Vec2) -> Self {
+    pub const fn to(face: Face, delay: f32, direction: Vec2) -> Self {
         Self {
             clock: Clock {
                 delay,
                 ..Clock::new(Self::DURATION)
             },
-            to: color,
+            to: face,
+            turned: false,
             direction,
         }
     }
 }
 
+/// The node showing the symbol of a face's node (see [`show_face`]).
+#[derive(Component)]
+pub struct FaceSymbol(pub Entity);
+
+/// Shows a face on a node at once: its color, and its symbol on the
+/// node's [`FaceSymbol`].
+pub fn show_face(commands: &mut Commands, symbol: Entity, face: &Face) -> BackgroundColor {
+    let mut node = commands.entity(symbol);
+    match &face.symbol {
+        Some((image, tint)) => {
+            node.insert((
+                ImageNode::new(image.clone()).with_color(*tint),
+                Visibility::Inherited,
+            ));
+        }
+        None => {
+            node.insert(Visibility::Hidden);
+        }
+    }
+    BackgroundColor(face.color)
+}
+
 fn flip(
     time: Res<Time>,
+    settings: Res<Settings>,
     mut commands: Commands,
-    mut nodes: Query<(Entity, &mut Flip, &mut UiTransform, &mut BackgroundColor)>,
+    mut nodes: Query<(
+        Entity,
+        &mut Flip,
+        &mut UiTransform,
+        &mut BackgroundColor,
+        &FaceSymbol,
+    )>,
 ) {
-    for (entity, mut flip, mut transform, mut background) in &mut nodes {
+    for (entity, mut flip, mut transform, mut background, &FaceSymbol(symbol)) in &mut nodes {
         let Some(t) = flip.clock.tick(time.delta_secs()) else {
             continue;
         };
+        let t = shown(t, settings.motion.flips);
         // Turning in place, the node turns about its vertical axis.
         let along = if flip.direction.y.abs() > flip.direction.x.abs() {
             Vec2::Y
@@ -108,8 +152,9 @@ fn flip(
         let hug = if t < 0.5 { 1.0 } else { -1.0 };
         let shift = flip.direction * hug * (1.0 - width) / 2.0 * 100.0;
         transform.translation = Val2::percent(shift.x, shift.y);
-        if t >= 0.5 {
-            background.0 = flip.to;
+        if t >= 0.5 && !flip.turned {
+            flip.turned = true;
+            *background = show_face(&mut commands, symbol, &flip.to);
         }
         if t >= 1.0 {
             transform.scale = Vec2::ONE;
@@ -143,6 +188,7 @@ impl Hop {
 
 fn hop(
     time: Res<Time>,
+    settings: Res<Settings>,
     mut commands: Commands,
     mut nodes: Query<(Entity, &mut Hop, &mut Node, &mut UiTransform)>,
 ) {
@@ -150,6 +196,7 @@ fn hop(
         let Some(t) = hop.clock.tick(time.delta_secs()) else {
             continue;
         };
+        let t = shown(t, settings.motion.hops);
         let at = hop
             .from
             .lerp(hop.to, EaseFunction::SineInOut.sample_clamped(t));
@@ -213,12 +260,14 @@ impl ScaleTo {
 
 fn scale_to(
     time: Res<Time>,
+    settings: Res<Settings>,
     mut commands: Commands,
     mut nodes: Query<(Entity, &mut ScaleTo, &mut UiTransform)>,
 ) {
     for (entity, mut scale, mut transform) in &mut nodes {
         // Before a delayed start the node already shows its first frame.
         let t = scale.clock.tick(time.delta_secs()).unwrap_or(0.0);
+        let t = shown(t, settings.motion.pops);
         let eased = scale.ease.sample_clamped(t);
         transform.scale = Vec2::splat(scale.from + (scale.to - scale.from) * eased);
         if t >= 1.0 {
@@ -253,6 +302,7 @@ impl Bounce {
 
 fn bounce(
     time: Res<Time>,
+    settings: Res<Settings>,
     mut commands: Commands,
     mut nodes: Query<(Entity, &mut Bounce, &mut UiTransform)>,
 ) {
@@ -260,6 +310,7 @@ fn bounce(
         let Some(t) = bounce.clock.tick(time.delta_secs()) else {
             continue;
         };
+        let t = shown(t, settings.motion.cheers);
         transform.translation.y = percent(-Bounce::HEIGHT * arc(t));
         if t >= 1.0 {
             commands.entity(entity).remove::<Bounce>();
@@ -279,10 +330,17 @@ impl Pulse {
     const PERIOD: f32 = 1.4;
 }
 
-fn pulse(time: Res<Time>, mut nodes: Query<(&Pulse, &mut UiTransform)>) {
-    let phase = (TAU * time.elapsed_secs() / Pulse::PERIOD).sin();
+fn pulse(time: Res<Time>, settings: Res<Settings>, mut nodes: Query<(&Pulse, &mut UiTransform)>) {
+    let phase = if settings.motion.pulses {
+        (TAU * time.elapsed_secs() / Pulse::PERIOD).sin()
+    } else {
+        0.0
+    };
     for (pulse, mut transform) in &mut nodes {
-        transform.scale = Vec2::splat(1.0 + pulse.amount * phase);
+        let scale = Vec2::splat(1.0 + pulse.amount * phase);
+        if transform.scale != scale {
+            transform.scale = scale;
+        }
     }
 }
 
@@ -296,8 +354,16 @@ impl ColorTo {
     const RATE: f32 = 14.0;
 }
 
-fn color_to(time: Res<Time>, mut nodes: Query<(&ColorTo, &mut BackgroundColor)>) {
-    let step = 1.0 - (-ColorTo::RATE * time.delta_secs()).exp();
+fn color_to(
+    time: Res<Time>,
+    settings: Res<Settings>,
+    mut nodes: Query<(&ColorTo, &mut BackgroundColor)>,
+) {
+    let step = if settings.motion.fades {
+        1.0 - (-ColorTo::RATE * time.delta_secs()).exp()
+    } else {
+        1.0
+    };
     for (target, mut background) in &mut nodes {
         let current = background.0.to_linear();
         let target = target.0.to_linear();

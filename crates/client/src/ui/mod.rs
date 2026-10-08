@@ -5,18 +5,24 @@
 //! - [`layout`]: the skeleton, adapting to the window,
 //! - [`board`]: cells and tokens,
 //! - [`hud`]: everything around the board,
+//! - [`settings_panel`]: the settings, over everything else,
 //! - [`keys`]: playing by keyboard,
 //! - [`anim`]: the animations views use,
+//! - [`widgets`]: buttons and controls,
 //! - [`tap`]: taps and clicks on nodes,
-//! - [`theme`]: colors and fonts.
+//! - [`theme`]: colors, fonts and the board's looks, with [`symbols`]
+//!   for the cards.
 
 mod anim;
 mod board;
 mod hud;
 mod keys;
 mod layout;
+mod settings_panel;
+mod symbols;
 mod tap;
 mod theme;
+mod widgets;
 
 use bevy::prelude::*;
 
@@ -36,15 +42,26 @@ pub enum Screen {
     Playing,
 }
 
+/// What covers the screen, taking all input.
+#[derive(States, Default, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Overlay {
+    #[default]
+    None,
+    Settings,
+}
+
 pub fn plugin(app: &mut App) {
     app.init_state::<Screen>()
+        .init_state::<Overlay>()
         .add_plugins((
             theme::plugin,
             anim::plugin,
             layout::plugin,
             board::plugin,
             hud::plugin,
+            settings_panel::plugin,
             keys::plugin,
+            widgets::plugin,
             tap::plugin,
         ))
         .add_systems(Startup, (spawn_camera, layout::spawn, hud::spawn).chain())

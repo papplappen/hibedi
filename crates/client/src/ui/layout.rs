@@ -49,9 +49,13 @@ struct Title;
 #[derive(Component)]
 struct Subtitle;
 
-/// The header band; the title is on its left, status goes on its right.
+/// The header band; the title is on its left.
 #[derive(Component)]
 pub struct Header;
+
+/// The header's right end, for status and buttons.
+#[derive(Component)]
+pub struct HeaderEnd;
 
 /// Everything below the header.
 #[derive(Component)]
@@ -96,19 +100,29 @@ pub fn spawn(mut commands: Commands, fonts: Res<Fonts>) {
                     column_gap: px(GAP),
                     ..default()
                 },
-                children![(
-                    Node {
-                        flex_direction: FlexDirection::Column,
-                        ..default()
-                    },
-                    children![
-                        (Title, fonts.text("HIBE DI HOPEDI", TITLE)),
-                        (
-                            Subtitle,
-                            fonts.text("A forced-hop territory prototype", SUBTITLE)
-                        ),
-                    ],
-                )],
+                children![
+                    (
+                        Node {
+                            flex_direction: FlexDirection::Column,
+                            ..default()
+                        },
+                        children![
+                            (Title, fonts.text("HIBE DI HOPEDI", TITLE)),
+                            (
+                                Subtitle,
+                                fonts.text("A forced-hop territory prototype", SUBTITLE)
+                            ),
+                        ],
+                    ),
+                    (
+                        HeaderEnd,
+                        Node {
+                            align_items: AlignItems::Center,
+                            column_gap: px(10),
+                            ..default()
+                        },
+                    ),
+                ],
             ),
             (
                 Content,

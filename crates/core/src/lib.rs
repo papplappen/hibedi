@@ -567,6 +567,11 @@ impl Game {
         self.placed_this_turn.is_none()
     }
 
+    /// The token placed this turn, once placed.
+    pub const fn placed_token(&self) -> Option<TokenId> {
+        self.placed_this_turn
+    }
+
     pub fn is_crossed_this_chain(&self, coord: Coord) -> bool {
         self.crossed_this_chain.contains(&coord)
     }

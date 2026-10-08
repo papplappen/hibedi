@@ -14,6 +14,8 @@
 use bevy::prelude::*;
 use hibedi_bots::Bot;
 use hibedi_core::{Action, Coord, Game, Phase, Side};
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 use crate::session::Session;
 use crate::settings::{BoardSize, Opponent, Settings};
@@ -82,8 +84,9 @@ pub struct Match {
     /// Whether the other player is connected, as of the last update;
     /// `None` without a session.
     opponent_online: Option<bool>,
-    /// The boards dealt.
+    /// The boards dealt, and the dealer's randomness.
     deal: BoardSize,
+    rng: StdRng,
 }
 
 impl Match {
@@ -96,10 +99,34 @@ impl Match {
             session: None,
             opponent_online: None,
             deal: settings.board,
+            rng: StdRng::from_rng(&mut rand::rng()),
         };
         play.configure(settings);
-        play.set_game(play.new_game());
+        let game = play.new_game();
+        play.set_game(game);
         play
+    }
+
+    /// (Command line, native.) Deals from `seed`, if given, starting over with a new deal: the
+    /// same seed deals the same boards, game after game.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_seed(mut self, seed: Option<u64>) -> Self {
+        if let Some(seed) = seed {
+            self.rng = StdRng::seed_from_u64(seed);
+            let game = self.new_game();
+            self.set_game(game);
+        }
+        self
+    }
+
+    /// (Command line, native.) Continues `game`, if given, instead of a
+    /// new deal.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_game(mut self, game: Option<Game>) -> Self {
+        if let Some(game) = game {
+            self.set_game(game);
+        }
+        self
     }
 
     /// Our seat in a shared game. A game already in progress arrives
@@ -119,10 +146,12 @@ impl Match {
             opponent_online: Some(session.everyone_online()),
             session: Some(session),
             deal: settings.board,
+            rng: StdRng::from_rng(&mut rand::rng()),
         };
         play.adopt_received();
         if play.game.is_none() && mine == Side::ALL[0] {
-            play.set_game(play.new_game());
+            let game = play.new_game();
+            play.set_game(game);
         }
         play
     }
@@ -192,7 +221,8 @@ impl Match {
 
     pub fn start_new_game(&mut self) {
         if self.can_start_new_game() {
-            self.set_game(self.new_game());
+            let game = self.new_game();
+            self.set_game(game);
         }
     }
 
@@ -340,8 +370,8 @@ impl Match {
         false
     }
 
-    fn new_game(&self) -> Game {
-        Game::new_random(self.deal.width, self.deal.height, &mut rand::rng())
+    fn new_game(&mut self) -> Game {
+        Game::new_random(self.deal.width, self.deal.height, &mut self.rng)
     }
 
     fn set_game(&mut self, game: Game) {

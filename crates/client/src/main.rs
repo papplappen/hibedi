@@ -9,7 +9,8 @@
 
 #![allow(
     clippy::type_complexity,
-    reason = "Bevy system parameters spell out their queries"
+    clippy::too_many_arguments,
+    reason = "Bevy systems take everything they use as parameters, queries spelled out"
 )]
 
 mod play;
@@ -51,50 +52,94 @@ fn start(app: &mut App, settings: &Settings) {
 }
 
 /// The command line decides: `--server <url>` plays through a relay,
-/// once it has seated a second player.
+/// once it has seated a second player; `--game <file>` continues a game
+/// written in notation (see [`hibedi_core::notation`]) on this device,
+/// and `--seed <n>` deals the same boards every time.
 #[cfg(not(target_arch = "wasm32"))]
 fn start(app: &mut App, settings: &Settings) {
     match parse_args() {
-        Some(url) => relay::join(app, url),
-        None => {
-            app.insert_resource(Match::local(settings));
+        Args::Online(url) => relay::join(app, url),
+        Args::Local { game, seed } => {
+            let play = Match::local(settings)
+                .with_seed(seed)
+                .with_game(game.map(|game| *game));
+            app.insert_resource(play);
         }
     }
 }
 
-/// Returns the relay URL, if one was given.
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_args() -> Option<String> {
+enum Args {
+    Online(String),
+    /// A game on this device, continuing the game given, if any, and
+    /// dealing from the seed given, if any.
+    Local {
+        game: Option<Box<hibedi_core::Game>>,
+        seed: Option<u64>,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_args() -> Args {
+    let fail = |message: String| -> ! {
+        eprintln!("{message}");
+        eprintln!("run with --help for usage");
+        std::process::exit(2);
+    };
     let mut server = None;
+    let mut game = None;
+    let mut seed = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        match arg.as_str() {
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) => (flag.to_owned(), Some(value.to_owned())),
+            None => (arg.clone(), None),
+        };
+        let mut value = || {
+            inline
+                .clone()
+                .or_else(|| args.next())
+                .unwrap_or_else(|| fail(format!("{flag} requires a value")))
+        };
+        match flag.as_str() {
             "--help" | "-h" => {
                 println!("Hibe di Hopedi");
                 println!();
-                println!("usage: hibedi-client [--server <ws-url>]");
+                println!("usage: hibedi-client [--server <ws-url> | --game <file> | --seed <n>]");
                 println!();
                 println!("  --server <url>   play online through a relay server (ws://host:3000)");
+                println!("  --game <file>    continue a game written in notation, on this device");
+                println!("  --seed <n>       deal the same boards every time, on this device");
                 println!("  (no arguments)   a game on this device (see its settings)");
                 std::process::exit(0);
             }
-            "--server" => {
-                server = Some(args.next().unwrap_or_else(|| {
-                    eprintln!("--server requires a URL, e.g. --server ws://127.0.0.1:3000");
-                    std::process::exit(2);
-                }));
+            "--server" => server = Some(normalize_url(&value())),
+            "--game" => {
+                let path = value();
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| fail(format!("cannot read {path}: {error}")));
+                game = Some(Box::new(
+                    hibedi_core::notation::read(&text)
+                        .unwrap_or_else(|error| fail(format!("{path}: {error}"))),
+                ));
             }
-            other if other.starts_with("--server=") => {
-                server = Some(other.trim_start_matches("--server=").to_owned());
+            "--seed" => {
+                let text = value();
+                seed = Some(
+                    text.parse()
+                        .unwrap_or_else(|_| fail(format!("not a seed: {text}"))),
+                );
             }
-            other => {
-                eprintln!("unknown argument: {other}");
-                eprintln!("run with --help for usage");
-                std::process::exit(2);
-            }
+            other => fail(format!("unknown argument: {other}")),
         }
     }
-    server.map(|raw| normalize_url(&raw))
+    match server {
+        Some(_) if game.is_some() || seed.is_some() => {
+            fail("--game and --seed are for games on this device, not online".to_owned())
+        }
+        Some(url) => Args::Online(url),
+        None => Args::Local { game, seed },
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

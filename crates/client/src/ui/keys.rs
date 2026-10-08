@@ -14,7 +14,7 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use hibedi_core::Action;
 
-use super::Screen;
+use super::{Overlay, Screen};
 use crate::play::Match;
 
 pub fn plugin(app: &mut App) {
@@ -45,7 +45,17 @@ pub fn label(actions: &[Action]) -> impl Iterator<Item = (char, Action)> + '_ {
     )
 }
 
-fn play_by_keyboard(mut presses: MessageReader<KeyboardInput>, mut play: ResMut<Match>) {
+fn play_by_keyboard(
+    mut presses: MessageReader<KeyboardInput>,
+    overlay: Res<State<Overlay>>,
+    mut play: ResMut<Match>,
+) {
+    // Keys pressed while something covers the board are not for it
+    // (and are read here, so they do not reach it later).
+    if *overlay.get() != Overlay::None {
+        presses.clear();
+        return;
+    }
     for press in presses.read() {
         if press.state != ButtonState::Pressed || press.repeat {
             continue;

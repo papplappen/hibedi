@@ -1,25 +1,33 @@
-//! Everything around the board: the presence pill in the header, the
-//! sidebar (score, whose turn it is and what to do, new game), and the
-//! notice shown while there is no game yet.
+//! Everything around the board: the presence pill and the settings
+//! button in the header, the sidebar (score, whose turn it is and what
+//! to do, new game, the replay of a finished game), and the notice shown
+//! while there is no game yet.
 
 use bevy::prelude::*;
 use hibedi_core::{Game, GameResult, Phase, Side, WinReason};
 
-use super::Screen;
-use super::anim::{Animate, ColorTo, ScaleTo};
-use super::layout::{Content, Header, Sidebar, WIDE_CARD_W};
-use super::tap::{Tap, Tappable};
+use super::anim::{Animate, ScaleTo};
+use super::layout::{Content, HeaderEnd, Sidebar, WIDE_CARD_W};
+use super::tap::Tap;
 use super::theme::{Fonts, TextStyle, palette, side_color};
-use crate::play::Match;
+use super::widgets::{self, ButtonColors, ButtonLabel};
+use super::{Overlay, Screen};
+use crate::play::{Match, Player};
+use crate::storage;
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<Notice>().add_systems(
         Update,
         (
             show_notice.run_if(resource_changed::<Notice>),
-            (show_presence, show_score, show_turn, show_new_game)
+            (
+                show_presence,
+                show_score,
+                show_turn,
+                show_new_game,
+                show_replay,
+            )
                 .run_if(in_state(Screen::Playing).and_then(resource_changed::<Match>)),
-            hover_buttons,
         )
             .before(Animate),
     );
@@ -66,17 +74,39 @@ const HELP: TextStyle = TextStyle::regular(13.0, palette::MUTED);
 
 const BUTTON_H: f32 = 44.0;
 const BUTTON: TextStyle = TextStyle::bold(15.0, palette::TEXT);
+const HEADER_BUTTON_H: f32 = 32.0;
+const HEADER_BUTTON: TextStyle = TextStyle::bold(14.0, palette::TEXT);
 
 // --- spawning ---
 
-/// The pill in the header and the notice card.
+/// The pill and the settings button in the header, and the notice card.
 pub fn spawn(
     mut commands: Commands,
     fonts: Res<Fonts>,
-    header: Single<Entity, With<Header>>,
+    header: Single<Entity, With<HeaderEnd>>,
     content: Single<Entity, With<Content>>,
 ) {
     spawn_pill(&mut commands, &fonts, *header);
+    commands
+        .spawn((
+            widgets::button(
+                &fonts,
+                "Settings",
+                HEADER_BUTTON,
+                palette::RAISED,
+                Node {
+                    height: px(HEADER_BUTTON_H),
+                    padding: UiRect::horizontal(px(14)),
+                    flex_shrink: 0.0,
+                    border_radius: BorderRadius::MAX,
+                    ..default()
+                },
+            ),
+            ChildOf(*header),
+        ))
+        .observe(|_: On<Tap>, mut overlay: ResMut<NextState<Overlay>>| {
+            overlay.set(Overlay::Settings);
+        });
     let notice = spawn_text_card(&mut commands, &fonts, *content);
     commands.entity(notice).insert((
         NoticeCard,
@@ -89,8 +119,8 @@ pub fn spawn(
     ));
 }
 
-/// The sidebar: score, turn card, the new-game button and a word on the
-/// controls beyond clicking.
+/// The sidebar: score, turn card, the new-game and replay buttons and a
+/// word on the controls beyond clicking.
 pub fn spawn_sidebar(
     mut commands: Commands,
     fonts: Res<Fonts>,
@@ -103,11 +133,12 @@ pub fn spawn_sidebar(
     let turn = spawn_text_card(&mut commands, &fonts, sidebar);
     commands.entity(turn).insert(TurnCard);
     spawn_new_game_button(&mut commands, &fonts, sidebar);
+    spawn_replay_button(&mut commands, &fonts, sidebar);
     commands.spawn((
         fonts.text(
             "Right-drag across cells to try a jump out; click to clear.\n\
-             Keys: those in the cell corners, Esc to choose another \
-             token, F2 for a new game.",
+             Keys: those in the cell corners; Esc takes back the token \
+             chosen before it hops; F2 deals a new game.",
             HELP,
         ),
         Node {
@@ -300,7 +331,15 @@ impl TurnText {
 
         let current = game.current_player();
         let to_move = format!("{current} to move");
+        if matches!(play.player(current), Player::Bot(_)) {
+            return text(Some(current), to_move, "The bot is thinking.".to_owned());
+        }
         match play.opponent_online() {
+            None if play.my_side() == Some(current) => text(
+                Some(current),
+                "Your move".to_owned(),
+                instruction(game).to_owned(),
+            ),
             None => text(Some(current), to_move, instruction(game).to_owned()),
             Some(false) => text(
                 Some(current),
@@ -324,10 +363,11 @@ impl TurnText {
 /// What the player to move does next.
 fn instruction(game: &Game) -> &'static str {
     let reconsider = !game.start_options().is_empty();
+    let placed = game.current_token().is_some() && game.current_token() == game.placed_token();
     match game.phase() {
         Phase::ChooseToken if game.places_token() => "Place a token on a cyan-marked cell.",
         Phase::ChooseToken => "Choose a glowing token to jump with.",
-        Phase::ChooseJump if reconsider && game.places_token() => {
+        Phase::ChooseJump if reconsider && placed => {
             "Jump to a gold-marked cell, or move the token to another cyan cell."
         }
         Phase::ChooseJump if reconsider => {
@@ -549,37 +589,25 @@ fn show_score(
 #[derive(Component)]
 struct NewGameButton;
 
-#[derive(Component)]
-struct NewGameLabel;
-
-/// A button's background at rest and under the pointer.
-#[derive(Component, PartialEq)]
-struct ButtonColors {
-    rest: Color,
-    hover: Color,
-}
-
 fn spawn_new_game_button(commands: &mut Commands, fonts: &Fonts, sidebar: Entity) {
     commands
         .spawn((
             NewGameButton,
-            Button,
-            Tappable,
-            Node {
-                // The slot stays when the button is hidden, so nothing
-                // moves when it appears.
-                height: px(BUTTON_H),
-                flex_shrink: 0.0,
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                border_radius: BorderRadius::all(px(10)),
-                ..default()
-            },
-            BackgroundColor(palette::RAISED),
+            widgets::button(
+                fonts,
+                "New game",
+                BUTTON,
+                palette::RAISED,
+                Node {
+                    // The slot stays when the button is hidden, so nothing
+                    // moves when it appears.
+                    height: px(BUTTON_H),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+            ),
             Visibility::Hidden,
-            UiTransform::IDENTITY,
             ChildOf(sidebar),
-            children![(NewGameLabel, fonts.text("New game", BUTTON))],
         ))
         .observe(|_: On<Tap>, mut play: ResMut<Match>| play.start_new_game());
 }
@@ -589,48 +617,99 @@ fn spawn_new_game_button(commands: &mut Commands, fonts: &Fonts, sidebar: Entity
 fn show_new_game(
     mut commands: Commands,
     play: Res<Match>,
-    button: Single<(Entity, &Visibility), With<NewGameButton>>,
-    label: Single<Entity, With<NewGameLabel>>,
+    button: Single<(Entity, &Visibility, &Children), With<NewGameButton>>,
+    labels: Query<(), With<ButtonLabel>>,
 ) {
-    let (entity, visibility) = *button;
+    let (entity, visibility, children) = *button;
     let shown = play.can_start_new_game();
     let primary = play.game().is_some_and(|game| game.result().is_some());
-    let (rest, hover, text) = if primary {
-        (
-            palette::GOLD,
-            palette::GOLD.lighter(0.08),
-            palette::BACKGROUND,
-        )
+    let (color, text) = if primary {
+        (palette::GOLD, palette::BACKGROUND)
     } else {
-        (
-            palette::RAISED,
-            palette::RAISED.lighter(0.08),
-            palette::TEXT,
-        )
+        (palette::RAISED, palette::TEXT)
     };
 
     let mut button = commands.entity(entity);
-    button.insert(ButtonColors { rest, hover });
+    button.insert(ButtonColors::of(color));
     if shown && *visibility == Visibility::Hidden {
         button.insert((Visibility::Inherited, ScaleTo::appear(0.0)));
     } else if !shown {
         button.insert(Visibility::Hidden);
     }
-    commands.entity(*label).insert(TextColor(text));
+    for label in children.iter().filter(|&child| labels.contains(child)) {
+        commands.entity(label).insert(TextColor(text));
+    }
 }
 
-fn hover_buttons(
-    mut commands: Commands,
-    buttons: Query<
-        (Entity, &Interaction, &ButtonColors),
-        Or<(Changed<Interaction>, Changed<ButtonColors>)>,
-    >,
+// --- replay ---
+
+/// Saves the finished game's record (see [`hibedi_core::notation`]).
+#[derive(Component)]
+struct ReplayButton;
+
+/// Says where the replay went.
+#[derive(Component)]
+struct ReplayNote;
+
+fn spawn_replay_button(commands: &mut Commands, fonts: &Fonts, sidebar: Entity) {
+    commands
+        .spawn((
+            ReplayButton,
+            widgets::button(
+                fonts,
+                "Download replay",
+                BUTTON,
+                palette::RAISED,
+                Node {
+                    display: Display::None,
+                    height: px(BUTTON_H),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+            ),
+            ChildOf(sidebar),
+        ))
+        .observe(download_replay);
+    commands.spawn((
+        ReplayNote,
+        fonts.text("", HELP),
+        Node {
+            display: Display::None,
+            margin: UiRect::horizontal(px(4)),
+            ..default()
+        },
+        ChildOf(sidebar),
+    ));
+}
+
+fn download_replay(
+    _: On<Tap>,
+    play: Res<Match>,
+    mut note: Single<(&mut Text, &mut Node), With<ReplayNote>>,
 ) {
-    for (entity, interaction, colors) in &buttons {
-        let color = match interaction {
-            Interaction::None => colors.rest,
-            Interaction::Hovered | Interaction::Pressed => colors.hover,
-        };
-        commands.entity(entity).insert(ColorTo(color));
+    let Some(text) = play.notation() else {
+        return;
+    };
+    let said = match storage::download("hibedi-replay.txt", &text) {
+        Ok(place) => format!("Saved to {place}."),
+        Err(error) => format!("Could not save the replay: {error}"),
+    };
+    let (shown, node) = &mut *note;
+    shown.0 = said;
+    node.display = Display::Flex;
+}
+
+/// The replay is offered once a game is over.
+fn show_replay(
+    play: Res<Match>,
+    mut button: Single<&mut Node, With<ReplayButton>>,
+    mut note: Single<&mut Node, (With<ReplayNote>, Without<ReplayButton>)>,
+) {
+    let over = play.game().is_some_and(|game| game.result().is_some());
+    let display = if over { Display::Flex } else { Display::None };
+    if button.display != display {
+        button.display = display;
+        // A new game's replay is not saved yet.
+        note.display = Display::None;
     }
 }
