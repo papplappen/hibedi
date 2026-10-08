@@ -1,7 +1,9 @@
 //! The web page around the wasm game (web/game.js). The page runs the
 //! rooms; the game only asks it for our seat, game states other players
 //! published and whether everyone is connected, and hands it the game
-//! states we publish. States cross as JSON text.
+//! states we publish. States cross as JSON text. The page also keeps
+//! what the game stores (see [`crate::storage`]) and hands the player
+//! the files the game offers.
 //!
 //! The page keeps what the room sends until we ask, so a game already
 //! in progress is there when the game starts.
@@ -30,6 +32,18 @@ extern "C" {
     /// Hands the page a game state we publish.
     #[wasm_bindgen(js_namespace = hibedi, js_name = publish)]
     fn page_publish(state: &str);
+
+    /// The text stored under a key, if any.
+    #[wasm_bindgen(js_namespace = hibedi)]
+    pub fn load(key: &str) -> Option<String>;
+
+    /// Stores text under a key.
+    #[wasm_bindgen(js_namespace = hibedi)]
+    pub fn save(key: &str, text: &str);
+
+    /// Offers the player a text file to save.
+    #[wasm_bindgen(js_namespace = hibedi)]
+    pub fn download(name: &str, text: &str);
 }
 
 /// Our seat in the page's room; `None` when the page runs a local game.

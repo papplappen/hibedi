@@ -23,6 +23,7 @@ use tungstenite::stream::MaybeTlsStream;
 
 use crate::play::Match;
 use crate::session::Session;
+use crate::settings::Settings;
 use crate::ui::Notice;
 
 /// How long the connection thread waits for an outgoing state before it
@@ -61,7 +62,8 @@ fn wait_for_seats(world: &mut World) {
     }
     if lobby.session.everyone_online() {
         let Lobby { session, .. } = world.remove_resource().expect("the lobby is waiting");
-        world.insert_resource(Match::online(Box::new(session)));
+        let play = Match::online(Box::new(session), world.resource::<Settings>());
+        world.insert_resource(play);
         return;
     }
     let notice = match lobby.session.seat {

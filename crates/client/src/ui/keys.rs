@@ -5,8 +5,9 @@
 //! Keys run along the keyboard's rows: 1 to 0, then Q to P, A to L and
 //! Z to M. Digits are read by position (so they need no Shift on layouts
 //! like AZERTY), letters as the layout types them, matching the labels.
-//! Esc takes back the choice of the token to jump with; F2 deals a new
-//! game, and so does Enter once a game is over.
+//! Esc takes back the token chosen to jump, placed or activated, before
+//! its first hop; F2 deals a new game, and so does Enter once a game is
+//! over.
 
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
@@ -33,14 +34,14 @@ const KEYS: [char; 36] = [
     'z', 'x', 'c', 'v', 'b', 'n', 'm',
 ];
 
-/// Pairs actions with their keys. `Unselect` has a key of its own (Esc)
+/// Pairs actions with their keys. `TakeBack` has a key of its own (Esc)
 /// and no cell to show a label on, so it is left out.
 pub fn label(actions: &[Action]) -> impl Iterator<Item = (char, Action)> + '_ {
     KEYS.into_iter().zip(
         actions
             .iter()
             .copied()
-            .filter(|&action| action != Action::Unselect),
+            .filter(|&action| action != Action::TakeBack),
     )
 }
 
@@ -59,7 +60,7 @@ fn play_by_keyboard(mut presses: MessageReader<KeyboardInput>, mut play: ResMut<
                 play.start_new_game();
                 continue;
             }
-            KeyCode::Escape => Some(Action::Unselect),
+            KeyCode::Escape => Some(Action::TakeBack),
             _ => typed(press)
                 .and_then(|key| label(&play.actions()).find(|&(label, _)| label == key))
                 .map(|(_, action)| action),

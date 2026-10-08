@@ -323,13 +323,17 @@ impl TurnText {
 
 /// What the player to move does next.
 fn instruction(game: &Game) -> &'static str {
+    let reconsider = !game.start_options().is_empty();
     match game.phase() {
-        Phase::PlaceInitialToken => "Place a token on a cyan-marked cell.",
-        Phase::ChooseJump if !game.selectable_activated_tokens().is_empty() => {
+        Phase::ChooseToken if game.places_token() => "Place a token on a cyan-marked cell.",
+        Phase::ChooseToken => "Choose a glowing token to jump with.",
+        Phase::ChooseJump if reconsider && game.places_token() => {
+            "Jump to a gold-marked cell, or move the token to another cyan cell."
+        }
+        Phase::ChooseJump if reconsider => {
             "Jump to a gold-marked cell, or switch to another glowing token."
         }
         Phase::ChooseJump => "Jump to a gold-marked cell. Every available jump is compulsory.",
-        Phase::ChooseActivatedToken => "Choose a glowing token to jump with.",
         Phase::GameOver => "",
     }
 }

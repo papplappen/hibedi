@@ -4,6 +4,7 @@
 //! (see [`start`]).
 //!
 //! - [`play`]: the match, the one resource the screen is drawn from,
+//! - [`settings`]: the player's settings,
 //! - [`ui`]: everything on screen, and turning clicks into moves.
 
 #![allow(
@@ -15,6 +16,8 @@ mod play;
 #[cfg(not(target_arch = "wasm32"))]
 mod relay;
 mod session;
+mod settings;
+mod storage;
 mod ui;
 #[cfg(target_arch = "wasm32")]
 mod web;
@@ -22,36 +25,39 @@ mod web;
 use bevy::prelude::*;
 
 use play::Match;
+use settings::Settings;
 
 fn main() -> AppExit {
+    let settings = Settings::load();
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(window()),
         ..default()
     }))
-    .add_plugins((play::plugin, ui::plugin));
-    start(&mut app);
+    .add_plugins((play::plugin, settings::plugin, ui::plugin));
+    start(&mut app, &settings);
+    app.insert_resource(settings);
     app.run()
 }
 
 /// The web page decides: it hands us a seat once its room is complete,
 /// or none for a local game (web/main.js).
 #[cfg(target_arch = "wasm32")]
-fn start(app: &mut App) {
+fn start(app: &mut App, settings: &Settings) {
     app.insert_resource(match web::session() {
-        Some(session) => Match::online(Box::new(session)),
-        None => Match::local(),
+        Some(session) => Match::online(Box::new(session), settings),
+        None => Match::local(settings),
     });
 }
 
 /// The command line decides: `--server <url>` plays through a relay,
 /// once it has seated a second player.
 #[cfg(not(target_arch = "wasm32"))]
-fn start(app: &mut App) {
+fn start(app: &mut App, settings: &Settings) {
     match parse_args() {
         Some(url) => relay::join(app, url),
         None => {
-            app.insert_resource(Match::local());
+            app.insert_resource(Match::local(settings));
         }
     }
 }
@@ -69,7 +75,7 @@ fn parse_args() -> Option<String> {
                 println!("usage: hibedi-client [--server <ws-url>]");
                 println!();
                 println!("  --server <url>   play online through a relay server (ws://host:3000)");
-                println!("  (no arguments)   local hotseat game");
+                println!("  (no arguments)   a game on this device (see its settings)");
                 std::process::exit(0);
             }
             "--server" => {

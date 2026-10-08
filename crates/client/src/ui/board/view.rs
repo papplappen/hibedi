@@ -39,7 +39,7 @@ pub struct CellView {
 /// What a click on a cell would do for the player to move.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hint {
-    /// A new token may be placed here.
+    /// A new token may be placed here (or moved here, before it hops).
     Place,
     /// The jumping token may land here.
     Land,
@@ -60,7 +60,8 @@ pub struct TokenView {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Halo {
     None,
-    /// The player to move may jump with it: it glows.
+    /// The player to move may jump with it (or switch to it, before the
+    /// token chosen hops): it glows.
     Selectable,
     /// Activated, but waiting (or unable) to move.
     Pending,
@@ -81,17 +82,23 @@ impl BoardView {
         } else {
             Vec::new()
         };
-        let selectable = game.selectable_activated_tokens();
+        // The cells a chain may start from, or, before the token chosen
+        // hops, the other choices it may be swapped for.
+        let starts = game.start_options();
         let pending = game.pending_activated_tokens();
 
         let cells = (0..board.storage_height() as i32)
             .flat_map(|y| (0..board.storage_width() as i32).map(move |x| Coord::new(x, y)))
             .map(|coord| {
                 let cell = board.cell_at(coord).unwrap_or(Cell::Empty);
-                let hint = match aimed_at(coord) {
-                    Some(Action::Place(_)) if viewer.hints => Some(Hint::Place),
-                    Some(Action::Jump(_)) if viewer.hints => Some(Hint::Land),
-                    _ => None,
+                let hint = if !viewer.hints {
+                    None
+                } else if matches!(aimed_at(coord), Some(Action::Jump(_))) {
+                    Some(Hint::Land)
+                } else if starts.contains(&coord) && !board.is_occupied(coord) {
+                    Some(Hint::Place)
+                } else {
+                    None
                 };
                 let key = keyed
                     .iter()
@@ -116,7 +123,7 @@ impl BoardView {
                 position: token.position,
                 jumping: game.current_token() == Some(token.id),
                 spent: game.is_spent(token.id),
-                halo: if viewer.hints && selectable.contains(&token.id) {
+                halo: if viewer.hints && starts.contains(&token.position) {
                     Halo::Selectable
                 } else if pending.contains(&token.id) {
                     Halo::Pending
@@ -171,7 +178,7 @@ mod tests {
     #[test]
     fn a_jump_marks_its_landing_and_the_crossed_cells() {
         let mut game = Game::from_board(Board::from_rows(&["RR.R", "G..."]), Side::Red);
-        assert!(game.apply(Action::Place(Coord::new(0, 1))));
+        assert!(game.apply(Action::Start(Coord::new(0, 1))));
         assert!(game.apply(Action::Jump(Direction::Right)));
 
         let view = BoardView::of(&game, HOTSEAT);

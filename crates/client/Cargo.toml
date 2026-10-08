@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 hibedi-core.workspace = true
+hibedi-bots.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 rand.workspace = true
 # A 2D UI game: Bevy's rendering and UI, without the 3D, audio and

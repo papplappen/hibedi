@@ -1,0 +1,11 @@
+[package]
+name = "hibedi-bots"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hibedi-core.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+rand.workspace = true

@@ -2840,14 +2840,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
+name = "hibedi-bots"
+version = "0.1.0"
+dependencies = [
+ "hibedi-core",
+ "rand 0.10.3",
+ "serde",
+]
+
+[[package]]
 name = "hibedi-client"
 version = "0.1.0"
 dependencies = [
  "bevy",
  "getrandom 0.4.3",
+ "hibedi-bots",
  "hibedi-core",
  "hibedi-relay-protocol",
  "rand 0.10.3",
+ "serde",
  "serde_json",
  "tungstenite 0.30.0",
  "wasm-bindgen",

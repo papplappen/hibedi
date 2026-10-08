@@ -1,3 +1,5 @@
+pub mod notation;
+
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -383,6 +385,10 @@ impl Board {
         true
     }
 
+    fn remove_token(&mut self, id: TokenId) {
+        self.tokens.retain(|token| token.id != id);
+    }
+
     fn move_token(&mut self, id: TokenId, landing: Coord) -> bool {
         if !self.can_host_token(landing) {
             return false;
@@ -423,9 +429,11 @@ impl Board {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
-    PlaceInitialToken,
+    /// The player chooses the token to jump with next: a new one placed
+    /// on an empty cell to open the turn, then the activated ones.
+    ChooseToken,
+    /// The token chosen jumps, as long as it can.
     ChooseJump,
-    ChooseActivatedToken,
     GameOver,
 }
 
@@ -446,30 +454,44 @@ pub enum GameResult {
 /// One decision of the player to move. Everything a player can do is an
 /// action, and [`Game::actions`] lists every one available: a player,
 /// human or bot, picks one of them and [`Game::apply`]s it.
+///
+/// A turn is a series of chains, each a token hopping as long as it
+/// can: `Start` chooses the token, `Jump`s hop it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "at", rename_all = "snake_case")]
 pub enum Action {
-    /// Places a new token on a cell; it starts jumping right away.
-    Place(Coord),
+    /// Starts a chain from a cell: the turn's first chain with a new
+    /// token placed on it, the others with the activated token on it.
+    Start(Coord),
     /// Hops the jumping token in a direction.
     Jump(Direction),
-    /// Chooses the activated token to jump with next.
-    Select(TokenId),
-    /// Takes back the choice of the activated token, before its first
-    /// hop: the choice only locks once jumping starts.
-    Unselect,
+    /// Takes back the token chosen, before its first hop, if there was a
+    /// choice: a placed token leaves the board again, an activated one
+    /// rejoins the others waiting. A choice only locks once jumping
+    /// starts.
+    TakeBack,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Game {
+    /// How the game started, and every action taken since (actions
+    /// taken back are dropped): enough to replay it (see [`notation`]).
+    start: Board,
+    first_player: Side,
+    history: Vec<Action>,
     board: Board,
     current_player: Side,
     phase: Phase,
     current_token: Option<TokenId>,
+    /// Whether the current token was chosen among others: only then may
+    /// it be taken back.
+    chosen_among_others: bool,
     crossed_this_chain: BTreeSet<Coord>,
     turn_start_tokens: BTreeSet<TokenId>,
+    /// The token placed this turn, once placed.
+    placed_this_turn: Option<TokenId>,
     activated_this_turn: BTreeSet<TokenId>,
-    pending_activated: Vec<TokenId>,
+    pending_activated: BTreeSet<TokenId>,
     next_token_id: u32,
     result: Option<GameResult>,
 }
@@ -488,7 +510,12 @@ impl Game {
     /// Starts a game from a prepared board. The first player is the side
     /// with fewer colored cells; `tie_breaker` decides equal counts.
     pub fn from_board(board: Board, tie_breaker: Side) -> Self {
-        let current_player = board.majority().map_or(tie_breaker, Side::other);
+        let first_player = board.majority().map_or(tie_breaker, Side::other);
+        Self::starting(board, first_player)
+    }
+
+    /// Starts a game from a prepared board with `first_player` to move.
+    fn starting(board: Board, first_player: Side) -> Self {
         let next_token_id = board
             .tokens
             .iter()
@@ -498,14 +525,19 @@ impl Game {
             .saturating_add(1);
 
         let mut game = Self {
+            start: board.clone(),
+            first_player,
+            history: Vec::new(),
             board,
-            current_player,
-            phase: Phase::PlaceInitialToken,
+            current_player: first_player,
+            phase: Phase::ChooseToken,
             current_token: None,
+            chosen_among_others: false,
             crossed_this_chain: BTreeSet::new(),
             turn_start_tokens: BTreeSet::new(),
+            placed_this_turn: None,
             activated_this_turn: BTreeSet::new(),
-            pending_activated: Vec::new(),
+            pending_activated: BTreeSet::new(),
             next_token_id,
             result: None,
         };
@@ -529,6 +561,12 @@ impl Game {
         self.current_token
     }
 
+    /// Whether the next token chosen is a new one, placed on the board:
+    /// the turn's first chain has not started yet.
+    pub const fn places_token(&self) -> bool {
+        self.placed_this_turn.is_none()
+    }
+
     pub fn is_crossed_this_chain(&self, coord: Coord) -> bool {
         self.crossed_this_chain.contains(&coord)
     }
@@ -537,27 +575,28 @@ impl Game {
         self.result
     }
 
+    /// The game as it started, before any action.
+    pub fn start(&self) -> Self {
+        Self::starting(self.start.clone(), self.first_player)
+    }
+
+    /// Every action taken so far, in order; actions taken back are left
+    /// out. Applied to [`Game::start`], they lead to this game.
+    pub fn history(&self) -> &[Action] {
+        &self.history
+    }
+
     /// Every action the player to move may take, ordered by the cell it
-    /// is aimed at, row by row (see [`Game::action_cell`]); `Unselect`,
+    /// is aimed at, row by row (see [`Game::action_cell`]); `TakeBack`,
     /// aimed at no cell, comes last. Empty once the game is over.
     pub fn actions(&self) -> Vec<Action> {
         let mut actions: Vec<Action> = match self.phase {
-            Phase::PlaceInitialToken => self
-                .board
-                .legal_initial_placements()
-                .into_iter()
-                .map(Action::Place)
-                .collect(),
+            Phase::ChooseToken => self.starts().into_iter().map(Action::Start).collect(),
             Phase::ChooseJump => self
                 .legal_current_jumps()
                 .into_iter()
                 .map(|jump| Action::Jump(jump.direction))
-                .chain(self.can_unselect().then_some(Action::Unselect))
-                .collect(),
-            Phase::ChooseActivatedToken => self
-                .movable_pending_tokens()
-                .into_iter()
-                .map(Action::Select)
+                .chain(self.can_take_back().then_some(Action::TakeBack))
                 .collect(),
             Phase::GameOver => Vec::new(),
         };
@@ -568,19 +607,18 @@ impl Game {
         actions
     }
 
-    /// The cell an action is aimed at: where a token is placed or lands,
-    /// or the token selected. `None` for `Unselect`, and for an action
-    /// that is not available.
+    /// The cell an action is aimed at: where a chain starts, or where the
+    /// jumping token lands. `None` for `TakeBack`, and for a jump that is
+    /// not available.
     pub fn action_cell(&self, action: Action) -> Option<Coord> {
         match action {
-            Action::Place(coord) => Some(coord),
+            Action::Start(coord) => Some(coord),
             Action::Jump(direction) => self
                 .legal_current_jumps()
                 .into_iter()
                 .find(|jump| jump.direction == direction)
                 .map(|jump| jump.landing),
-            Action::Select(token) => self.board.token_position(token),
-            Action::Unselect => None,
+            Action::TakeBack => None,
         }
     }
 
@@ -589,12 +627,20 @@ impl Game {
     /// and returns false.
     #[must_use = "the action is not taken when it returns false"]
     pub fn apply(&mut self, action: Action) -> bool {
-        match action {
-            Action::Place(coord) => self.place_initial_token(coord),
+        let applied = match action {
+            Action::Start(coord) => self.start_chain(coord),
             Action::Jump(direction) => self.jump(direction),
-            Action::Select(token) => self.select_activated_token(token),
-            Action::Unselect => self.unselect(),
+            Action::TakeBack => self.take_back(),
+        };
+        if applied {
+            if action == Action::TakeBack {
+                // It takes back the start just made.
+                self.history.pop();
+            } else {
+                self.history.push(action);
+            }
         }
+        applied
     }
 
     /// The jumps open to the jumping token.
@@ -611,18 +657,30 @@ impl Game {
             .unwrap_or_default()
     }
 
-    pub fn pending_activated_tokens(&self) -> &[TokenId] {
+    /// The tokens activated this turn that have not jumped yet.
+    pub fn pending_activated_tokens(&self) -> &BTreeSet<TokenId> {
         &self.pending_activated
     }
 
-    /// The activated tokens the player to move may jump with: the ones
-    /// to choose from, or, before the first hop of a chosen one, the
-    /// others it may still be swapped for (`Unselect`, then `Select`).
-    pub fn selectable_activated_tokens(&self) -> Vec<TokenId> {
+    /// The cells the player to move may start a chain from: the ones to
+    /// choose from, or, before the first hop of a token chosen among
+    /// others, the others it may still be swapped for (`TakeBack`, then
+    /// `Start`).
+    pub fn start_options(&self) -> Vec<Coord> {
         match self.phase {
-            Phase::ChooseActivatedToken => self.movable_pending_tokens(),
-            Phase::ChooseJump if self.crossed_this_chain.is_empty() => {
-                self.movable_pending_tokens()
+            Phase::ChooseToken => self.starts(),
+            Phase::ChooseJump if self.can_take_back() => {
+                let mut before = self.clone();
+                let taken_back = before.take_back();
+                debug_assert!(taken_back, "a token that may be taken back is");
+                let chosen = self
+                    .current_token
+                    .and_then(|token| self.board.token_position(token));
+                before
+                    .starts()
+                    .into_iter()
+                    .filter(|&cell| Some(cell) != chosen)
+                    .collect()
             }
             _ => Vec::new(),
         }
@@ -631,28 +689,49 @@ impl Game {
     /// Whether a token is done for this turn: it has jumped, and is
     /// neither jumping now nor able to be activated again.
     pub fn is_spent(&self, token: TokenId) -> bool {
-        matches!(self.phase, Phase::ChooseJump | Phase::ChooseActivatedToken)
+        self.phase != Phase::GameOver
             && self.current_token != Some(token)
             && !self.pending_activated.contains(&token)
-            && (!self.turn_start_tokens.contains(&token)
-                || self.activated_this_turn.contains(&token))
+            && (self.placed_this_turn == Some(token) || self.activated_this_turn.contains(&token))
     }
 
-    fn place_initial_token(&mut self, coord: Coord) -> bool {
-        if self.phase != Phase::PlaceInitialToken
-            || !self.board.legal_initial_placements().contains(&coord)
-        {
+    /// Where the next chain may start: on a free cell to place the turn's
+    /// token on, then on the activated tokens able to jump.
+    fn starts(&self) -> Vec<Coord> {
+        if self.places_token() {
+            self.board.legal_initial_placements()
+        } else {
+            self.movable_pending_tokens()
+                .into_iter()
+                .filter_map(|token| self.board.token_position(token))
+                .collect()
+        }
+    }
+
+    fn start_chain(&mut self, coord: Coord) -> bool {
+        let starts = self.starts();
+        if self.phase != Phase::ChooseToken || !starts.contains(&coord) {
             return false;
         }
 
-        let token = TokenId(self.next_token_id);
-        self.next_token_id = self.next_token_id.saturating_add(1);
-
-        if !self.board.add_token(token, coord) {
-            return false;
-        }
+        let token = if self.places_token() {
+            let token = TokenId(self.next_token_id);
+            if !self.board.add_token(token, coord) {
+                return false;
+            }
+            self.next_token_id += 1;
+            self.placed_this_turn = Some(token);
+            token
+        } else {
+            let Some(token) = self.board.token_at(coord) else {
+                return false;
+            };
+            self.pending_activated.remove(&token);
+            token
+        };
 
         self.current_token = Some(token);
+        self.chosen_among_others = starts.len() > 1;
         self.crossed_this_chain.clear();
         self.phase = Phase::ChooseJump;
         true
@@ -704,52 +783,43 @@ impl Game {
         true
     }
 
-    fn select_activated_token(&mut self, token: TokenId) -> bool {
-        if self.phase != Phase::ChooseActivatedToken
-            || !self.movable_pending_tokens().contains(&token)
-        {
-            return false;
-        }
-
-        self.pending_activated.retain(|pending| *pending != token);
-        self.current_token = Some(token);
-        self.crossed_this_chain.clear();
-        self.phase = Phase::ChooseJump;
-        true
-    }
-
-    /// Whether the jumping token was chosen among others and has not
-    /// hopped yet. A freshly placed token was never chosen: nothing is
-    /// pending before its first hop.
-    fn can_unselect(&self) -> bool {
+    fn can_take_back(&self) -> bool {
         self.phase == Phase::ChooseJump
             && self.crossed_this_chain.is_empty()
-            && !self.movable_pending_tokens().is_empty()
+            && self.chosen_among_others
     }
 
-    /// Returns the chosen token to the pending ones, so the turn asks
-    /// for a token again.
-    fn unselect(&mut self) -> bool {
-        if !self.can_unselect() {
+    /// Undoes the start of the chain, so the turn asks for a token again.
+    fn take_back(&mut self) -> bool {
+        if !self.can_take_back() {
             return false;
         }
         let Some(token) = self.current_token.take() else {
             return false;
         };
-        self.pending_activated.push(token);
-        self.phase = Phase::ChooseActivatedToken;
+        if self.placed_this_turn == Some(token) {
+            self.board.remove_token(token);
+            self.next_token_id -= 1;
+            self.placed_this_turn = None;
+        } else {
+            self.pending_activated.insert(token);
+        }
+        self.chosen_among_others = false;
+        self.phase = Phase::ChooseToken;
         true
     }
 
     fn begin_turn_or_finish(&mut self) {
         self.current_token = None;
+        self.chosen_among_others = false;
         self.crossed_this_chain.clear();
+        self.placed_this_turn = None;
         self.activated_this_turn.clear();
         self.pending_activated.clear();
         self.turn_start_tokens = self.board.tokens.iter().map(|token| token.id).collect();
 
         if self.board.has_initial_move() {
-            self.phase = Phase::PlaceInitialToken;
+            self.phase = Phase::ChooseToken;
             self.result = None;
         } else {
             self.finish_with_result(self.board.majority_result());
@@ -766,7 +836,7 @@ impl Game {
 
                 if self.turn_start_tokens.contains(&token) && self.activated_this_turn.insert(token)
                 {
-                    self.pending_activated.push(token);
+                    self.pending_activated.insert(token);
                 }
             }
         }
@@ -788,18 +858,20 @@ impl Game {
 
     fn finish_current_chain(&mut self) {
         self.current_token = None;
+        self.chosen_among_others = false;
         self.crossed_this_chain.clear();
 
         if self.movable_pending_tokens().is_empty() {
             self.current_player = self.current_player.other();
             self.begin_turn_or_finish();
         } else {
-            self.phase = Phase::ChooseActivatedToken;
+            self.phase = Phase::ChooseToken;
         }
     }
 
     fn finish_with_result(&mut self, result: GameResult) {
         self.current_token = None;
+        self.chosen_among_others = false;
         self.crossed_this_chain.clear();
         self.phase = Phase::GameOver;
         self.result = Some(result);
@@ -882,47 +954,84 @@ mod tests {
         // Green (fewer cells) places above the red column and jumps
         // through it (two compulsory hops), activating both waiting
         // tokens.
-        assert!(game.apply(Action::Place(Coord::new(2, 1))));
-        // A freshly placed token was not chosen among others.
-        assert!(!game.actions().contains(&Action::Unselect));
+        assert!(game.apply(Action::Start(Coord::new(2, 1))));
         assert!(game.apply(Action::Jump(Direction::Down)));
         assert!(game.apply(Action::Jump(Direction::Down)));
 
-        assert_eq!(game.phase(), Phase::ChooseActivatedToken);
+        assert_eq!(game.phase(), Phase::ChooseToken);
         assert_eq!(
             game.actions(),
-            vec![Action::Select(first), Action::Select(second)]
+            vec![
+                Action::Start(Coord::new(1, 2)),
+                Action::Start(Coord::new(1, 3))
+            ]
         );
 
         // Choosing one does not lock the choice in yet: the other one
         // still glows, and the choice can be taken back.
-        assert!(game.apply(Action::Select(first)));
+        assert!(game.apply(Action::Start(Coord::new(1, 2))));
         assert_eq!(game.current_token(), Some(first));
         assert_eq!(game.phase(), Phase::ChooseJump);
-        assert_eq!(game.selectable_activated_tokens(), vec![second]);
+        assert_eq!(game.start_options(), vec![Coord::new(1, 3)]);
         assert_eq!(
             game.actions(),
-            vec![Action::Jump(Direction::Right), Action::Unselect]
+            vec![Action::Jump(Direction::Right), Action::TakeBack]
         );
-        assert!(!game.apply(Action::Select(second)));
+        assert!(!game.apply(Action::Start(Coord::new(1, 3))));
 
-        assert!(game.apply(Action::Unselect));
-        assert_eq!(game.phase(), Phase::ChooseActivatedToken);
+        assert!(game.apply(Action::TakeBack));
+        assert_eq!(game.phase(), Phase::ChooseToken);
         assert_eq!(game.current_token(), None);
-        assert!(game.apply(Action::Select(second)));
+        assert!(game.apply(Action::Start(Coord::new(1, 3))));
         assert!(game.pending_activated_tokens().contains(&first));
 
         // Once the chain has started hopping, the choice locks.
         assert!(game.apply(Action::Jump(Direction::Right)));
         assert_eq!(game.phase(), Phase::ChooseJump);
-        assert!(game.selectable_activated_tokens().is_empty());
-        assert!(!game.apply(Action::Unselect));
+        assert!(game.start_options().is_empty());
+        assert!(!game.apply(Action::TakeBack));
 
         // The chain runs out of jumps after the second hop, and the
         // remaining activated token is asked for as usual.
         assert!(game.apply(Action::Jump(Direction::Right)));
-        assert_eq!(game.phase(), Phase::ChooseActivatedToken);
-        assert_eq!(game.actions(), vec![Action::Select(first)]);
+        assert_eq!(game.phase(), Phase::ChooseToken);
+        assert_eq!(game.actions(), vec![Action::Start(Coord::new(1, 2))]);
+    }
+
+    #[test]
+    fn a_placed_token_can_be_taken_back_before_its_first_hop() {
+        let board = board_from_rows(&["RR.R", "G..."]);
+        let mut game = Game::from_board(board, Side::Red);
+        let fresh = game.clone();
+
+        assert!(game.apply(Action::Start(Coord::new(0, 1))));
+        assert!(game.actions().contains(&Action::TakeBack));
+        assert!(game.apply(Action::TakeBack));
+        // As if it was never placed: the same token is placed next.
+        assert_eq!(game, fresh);
+
+        assert!(game.apply(Action::Start(Coord::new(0, 1))));
+        assert!(game.apply(Action::Jump(Direction::Right)));
+        assert!(!game.actions().contains(&Action::TakeBack));
+        assert!(!game.apply(Action::TakeBack));
+    }
+
+    #[test]
+    fn the_history_replays_to_the_game() {
+        let mut rng = rand::rng();
+        for _ in 0..50 {
+            let mut game = Game::new_random(BOARD_WIDTH, BOARD_HEIGHT, &mut rng);
+            while game.result().is_none() {
+                let actions = game.actions();
+                let action = actions[rng.random_range(0..actions.len())];
+                assert!(game.apply(action));
+            }
+            let mut replayed = game.start();
+            for &action in game.history() {
+                assert!(replayed.apply(action));
+            }
+            assert_eq!(replayed, game);
+        }
     }
 
     #[test]
@@ -935,7 +1044,7 @@ mod tests {
         let mut game = Game::from_board(board, Side::Red);
         assert!(!game.is_spent(first));
 
-        assert!(game.apply(Action::Place(Coord::new(2, 1))));
+        assert!(game.apply(Action::Start(Coord::new(2, 1))));
         let placed = game.current_token().unwrap();
         assert!(game.apply(Action::Jump(Direction::Down)));
         // Jumping is not spent yet.
@@ -946,7 +1055,7 @@ mod tests {
         assert!(!game.is_spent(first));
         assert!(!game.is_spent(second));
 
-        assert!(game.apply(Action::Select(second)));
+        assert!(game.apply(Action::Start(Coord::new(1, 3))));
         assert!(game.apply(Action::Jump(Direction::Right)));
         assert!(game.apply(Action::Jump(Direction::Right)));
         assert!(game.is_spent(second));
@@ -992,12 +1101,12 @@ mod tests {
         assert!(board.add_token(diagonal, Coord::new(1, 1)));
         let mut game = Game::from_board(board, Side::Red);
 
-        assert!(game.apply(Action::Place(Coord::new(1, 2))));
+        assert!(game.apply(Action::Start(Coord::new(1, 2))));
         assert!(game.apply(Action::Jump(Direction::Right)));
 
-        assert_eq!(game.phase(), Phase::ChooseActivatedToken);
-        assert_eq!(game.pending_activated_tokens(), &[cardinal]);
-        assert_eq!(game.selectable_activated_tokens(), vec![cardinal]);
+        assert_eq!(game.phase(), Phase::ChooseToken);
+        assert_eq!(game.pending_activated_tokens(), &BTreeSet::from([cardinal]));
+        assert_eq!(game.start_options(), vec![Coord::new(2, 1)]);
     }
 
     #[test]
@@ -1006,7 +1115,7 @@ mod tests {
         let mut game = Game::from_board(board, Side::Green);
 
         assert_eq!(game.current_player(), Side::Green);
-        assert!(game.apply(Action::Place(Coord::new(4, 1))));
+        assert!(game.apply(Action::Start(Coord::new(4, 1))));
         assert!(game.apply(Action::Jump(Direction::Left)));
 
         assert_eq!(game.phase(), Phase::GameOver);
@@ -1024,7 +1133,7 @@ mod tests {
         let board = board_from_rows(&["RR.R", "G..."]);
         let mut game = Game::from_board(board, Side::Red);
 
-        assert!(game.apply(Action::Place(Coord::new(0, 1))));
+        assert!(game.apply(Action::Start(Coord::new(0, 1))));
         assert!(game.apply(Action::Jump(Direction::Right)));
 
         assert_eq!(game.phase(), Phase::ChooseJump);
@@ -1046,11 +1155,14 @@ mod tests {
         assert!(board.add_token(outer_token, Coord::new(2, 0)));
         let mut game = Game::from_board(board, Side::Red);
 
-        assert!(game.apply(Action::Place(Coord::new(1, 1))));
+        assert!(game.apply(Action::Start(Coord::new(1, 1))));
         assert!(game.apply(Action::Jump(Direction::Right)));
 
-        assert_eq!(game.phase(), Phase::ChooseActivatedToken);
-        assert_eq!(game.pending_activated_tokens(), &[outer_token]);
+        assert_eq!(game.phase(), Phase::ChooseToken);
+        assert_eq!(
+            game.pending_activated_tokens(),
+            &BTreeSet::from([outer_token])
+        );
     }
 
     #[test]
@@ -1060,7 +1172,7 @@ mod tests {
         let mut board = board_from_rows(&["RR.R", "G..."]);
         assert!(board.add_token(TokenId(7), Coord::new(5, 2)));
         let mut game = Game::from_board(board, Side::Red);
-        assert!(game.apply(Action::Place(Coord::new(0, 1))));
+        assert!(game.apply(Action::Start(Coord::new(0, 1))));
         assert!(game.apply(Action::Jump(Direction::Right)));
 
         let json = serde_json::to_string(&game).unwrap();
