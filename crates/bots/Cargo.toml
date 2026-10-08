@@ -4,8 +4,13 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+clap = { version = "4.6.7", features = ["derive"], optional = true }
 hibedi-core.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
 rand.workspace = true
+
+[features]
+clap = ["dep:clap"]

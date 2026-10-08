@@ -15,12 +15,14 @@
 #   tools/e2e/e2e.sh start --game /tmp/g.txt
 #   tools/e2e/e2e.sh do key:1 sleep:1 shot:/tmp/after.png
 #
-# SETTINGS='{"theme":"cards"}' starts with those settings (the rest
-# default). The client's config, home (downloads land in its Downloads)
-# and log live in $E2E_DIR (default target/e2e).
+# Settings are client args too (--theme cards, --animations none, ...;
+# see hibedi-client --help); the rest start at their defaults. The
+# client's config, home (downloads land in its Downloads) and log live
+# in $E2E_DIR (default target/e2e).
 set -e
 cd "$(dirname "$0")/../.."
-dir=${E2E_DIR:-target/e2e}
+# Absolute: relative XDG paths do not count (and fall back to $HOME).
+dir=$(realpath -m "${E2E_DIR:-target/e2e}")
 display=${E2E_DISPLAY:-:77}
 
 case "$1" in
@@ -29,9 +31,9 @@ start)
     cargo build -q -p hibedi-client
     "$0" stop
     rm -rf "$dir"
-    mkdir -p "$dir/config/hibedi" "$dir/home/Downloads"
-    [ -n "$SETTINGS" ] && printf '%s' "$SETTINGS" > "$dir/config/hibedi/settings.json"
+    mkdir -p "$dir/config" "$dir/home/Downloads"
     Xvfb "$display" -screen 0 1400x900x24 >/dev/null 2>&1 &
+    "$0" do  # until the display takes clients
     # Vulkan on Xvfb presents only through the software WSI.
     DISPLAY=$display WAYLAND_DISPLAY= MESA_VK_WSI_DEBUG=sw \
         XDG_CONFIG_HOME="$dir/config" HOME="$dir/home" \
@@ -49,7 +51,7 @@ stop)
     while pgrep -f "Xvfb $display" >/dev/null; do sleep 0.1; done
     ;;
 *)
-    sed -n '2,24p' "$0"
+    sed -n '2,25p' "$0"
     exit 2
     ;;
 esac

@@ -11,6 +11,7 @@ pub const BOARD_WIDTH: usize = 4;
 pub const BOARD_HEIGHT: usize = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
     Red,

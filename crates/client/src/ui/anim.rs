@@ -2,7 +2,7 @@
 //! aspect of its node; one-shot animations remove themselves when done.
 //! Views only insert them: inserting one again restarts it.
 //!
-//! The player may switch each kind off in the settings ([`crate::settings::Motion`]):
+//! The player may switch each kind off in the settings ([`Animation`]):
 //! then it jumps to its end, though a flip still waits for its moment.
 //!
 //! | component   | drives                              |
@@ -20,7 +20,7 @@ use bevy::color::color_difference::EuclideanDistance;
 use bevy::prelude::*;
 
 use super::theme::Face;
-use crate::settings::Settings;
+use crate::settings::{Animation, Settings};
 
 pub fn plugin(app: &mut App) {
     app.add_systems(
@@ -139,7 +139,7 @@ fn flip(
         let Some(t) = flip.clock.tick(time.delta_secs()) else {
             continue;
         };
-        let t = shown(t, settings.motion.flips);
+        let t = shown(t, settings.motion.plays(Animation::Flips));
         // Turning in place, the node turns about its vertical axis.
         let along = if flip.direction.y.abs() > flip.direction.x.abs() {
             Vec2::Y
@@ -196,7 +196,7 @@ fn hop(
         let Some(t) = hop.clock.tick(time.delta_secs()) else {
             continue;
         };
-        let t = shown(t, settings.motion.hops);
+        let t = shown(t, settings.motion.plays(Animation::Hops));
         let at = hop
             .from
             .lerp(hop.to, EaseFunction::SineInOut.sample_clamped(t));
@@ -267,7 +267,7 @@ fn scale_to(
     for (entity, mut scale, mut transform) in &mut nodes {
         // Before a delayed start the node already shows its first frame.
         let t = scale.clock.tick(time.delta_secs()).unwrap_or(0.0);
-        let t = shown(t, settings.motion.pops);
+        let t = shown(t, settings.motion.plays(Animation::Pops));
         let eased = scale.ease.sample_clamped(t);
         transform.scale = Vec2::splat(scale.from + (scale.to - scale.from) * eased);
         if t >= 1.0 {
@@ -310,7 +310,7 @@ fn bounce(
         let Some(t) = bounce.clock.tick(time.delta_secs()) else {
             continue;
         };
-        let t = shown(t, settings.motion.cheers);
+        let t = shown(t, settings.motion.plays(Animation::Cheers));
         transform.translation.y = percent(-Bounce::HEIGHT * arc(t));
         if t >= 1.0 {
             commands.entity(entity).remove::<Bounce>();
@@ -331,7 +331,7 @@ impl Pulse {
 }
 
 fn pulse(time: Res<Time>, settings: Res<Settings>, mut nodes: Query<(&Pulse, &mut UiTransform)>) {
-    let phase = if settings.motion.pulses {
+    let phase = if settings.motion.plays(Animation::Pulses) {
         (TAU * time.elapsed_secs() / Pulse::PERIOD).sin()
     } else {
         0.0
@@ -359,7 +359,7 @@ fn color_to(
     settings: Res<Settings>,
     mut nodes: Query<(&ColorTo, &mut BackgroundColor)>,
 ) {
-    let step = if settings.motion.fades {
+    let step = if settings.motion.plays(Animation::Fades) {
         1.0 - (-ColorTo::RATE * time.delta_secs()).exp()
     } else {
         1.0

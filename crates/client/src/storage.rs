@@ -2,7 +2,7 @@
 //!
 //! - wasm: the page's `localStorage`, and downloads (see [`crate::web`]),
 //! - native: files in the user's config directory, and saving into the
-//!   downloads directory.
+//!   downloads directory (as the platform has them, see [`dirs`]).
 
 /// The text stored under `key`, if any.
 pub fn load(key: &str) -> Option<String> {
@@ -47,19 +47,8 @@ mod imp {
 
     const APP: &str = "hibedi";
 
-    /// `$XDG_CONFIG_HOME/hibedi`, else `~/.config/hibedi` (on Windows
-    /// `%APPDATA%\hibedi`).
-    fn config_dir() -> Option<PathBuf> {
-        let env = |name| std::env::var_os(name).filter(|value| !value.is_empty());
-        let base = env("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env("APPDATA").map(PathBuf::from))
-            .or_else(|| env("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-        Some(base.join(APP))
-    }
-
     fn file(key: &str) -> Option<PathBuf> {
-        Some(config_dir()?.join(format!("{key}.json")))
+        Some(dirs::config_dir()?.join(APP).join(format!("{key}.json")))
     }
 
     pub fn load(key: &str) -> Option<String> {
@@ -79,12 +68,10 @@ mod imp {
         }
     }
 
-    /// Saves into `~/Downloads` if there is one, else the working
-    /// directory, never overwriting an earlier file.
+    /// Saves into the downloads directory if there is one, else the
+    /// working directory, never overwriting an earlier file.
     pub fn download(name: &str, text: &str) -> Result<String, String> {
-        let downloads = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(|home| PathBuf::from(home).join("Downloads"))
+        let downloads = dirs::download_dir()
             .filter(|dir| dir.is_dir())
             .unwrap_or_else(|| PathBuf::from("."));
         let (stem, extension) = name.rsplit_once('.').unwrap_or((name, ""));

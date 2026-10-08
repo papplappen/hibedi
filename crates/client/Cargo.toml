@@ -29,6 +29,10 @@ bevy = { version = "0.19.1", default-features = false, features = [
 ] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+clap = { version = "4.6.7", features = ["derive", "string"] }
+dirs = "7.0.0"
+hibedi-bots = { workspace = true, features = ["clap"] }
+hibedi-core = { workspace = true, features = ["clap"] }
 hibedi-relay-protocol.workspace = true
 tungstenite = "0.30"
 

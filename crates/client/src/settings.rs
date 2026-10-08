@@ -1,6 +1,12 @@
 //! The player's settings, kept on the device (see [`crate::storage`])
-//! and saved whenever they change. Plain data: what each setting does
-//! is up to the parts of the game reading it.
+//! and saved whenever the player changes them. Plain data: what each
+//! setting does is up to the parts of the game reading it.
+//!
+//! Natively, every setting can also be given on the command line
+//! ([`SettingsArgs`]), for that run: it is saved only along with a later
+//! change.
+
+use std::collections::BTreeSet;
 
 use bevy::prelude::*;
 use hibedi_bots::BotKind;
@@ -59,6 +65,10 @@ impl Settings {
 }
 
 fn save(settings: Res<Settings>) {
+    // Not as loaded (or as given on the command line), only as changed.
+    if settings.is_added() {
+        return;
+    }
     let text = serde_json::to_string(&*settings).expect("settings always serialize");
     storage::save(KEY, &text);
 }
@@ -96,39 +106,72 @@ pub enum Opponent {
     Bot(BotKind),
 }
 
-/// Which animations play; those switched off jump to their end.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Motion {
+/// A kind of animation, which the player may switch off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(clap::ValueEnum))]
+#[serde(rename_all = "snake_case")]
+pub enum Animation {
     /// Tokens hop from cell to cell (else they appear where they land).
-    pub hops: bool,
+    Hops,
     /// Cells turn over as they change color.
-    pub flips: bool,
+    Flips,
     /// Things grow in and out, counts swell as they change.
-    pub pops: bool,
+    Pops,
     /// Hints and glowing tokens breathe.
-    pub pulses: bool,
+    Pulses,
     /// The winner's cells jump for joy.
-    pub cheers: bool,
+    Cheers,
     /// Colors fade into each other.
-    pub fades: bool,
+    Fades,
 }
 
-impl Default for Motion {
-    fn default() -> Self {
-        Self {
-            hops: true,
-            flips: true,
-            pops: true,
-            pulses: true,
-            cheers: true,
-            fades: true,
+impl Animation {
+    pub const ALL: [Self; 6] = [
+        Self::Hops,
+        Self::Flips,
+        Self::Pops,
+        Self::Pulses,
+        Self::Cheers,
+        Self::Fades,
+    ];
+
+    /// What players read in the settings.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Hops => "Tokens hop",
+            Self::Flips => "Cells flip over",
+            Self::Pops => "Things pop in and out",
+            Self::Pulses => "Hints pulse",
+            Self::Cheers => "Winning cells cheer",
+            Self::Fades => "Colors fade",
+        }
+    }
+}
+
+/// Which animations play; those switched off jump to their end.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Motion {
+    off: BTreeSet<Animation>,
+}
+
+impl Motion {
+    pub fn plays(&self, animation: Animation) -> bool {
+        !self.off.contains(&animation)
+    }
+
+    pub fn set(&mut self, animation: Animation, on: bool) {
+        if on {
+            self.off.remove(&animation);
+        } else {
+            self.off.insert(animation);
         }
     }
 }
 
 /// The look of the board.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(clap::ValueEnum))]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeKind {
     /// Flat colored tiles and flat tokens.
@@ -146,5 +189,167 @@ impl ThemeKind {
             Self::Classic => "Classic",
             Self::Cards => "Cards",
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use command_line::SettingsArgs;
+
+/// The settings as command line options (native only).
+#[cfg(not(target_arch = "wasm32"))]
+mod command_line {
+    use std::sync::LazyLock;
+
+    use clap::ValueEnum;
+    use clap::builder::PossibleValue;
+
+    use super::*;
+
+    /// Settings for this run; the rest stay as saved.
+    #[derive(clap::Args, Debug, Default)]
+    pub struct SettingsArgs {
+        /// Who plays the other side on this device
+        #[arg(long)]
+        opponent: Option<Opponent>,
+        /// The side you take against a bot
+        #[arg(long)]
+        side: Option<Side>,
+        /// The boards dealt
+        #[arg(long)]
+        size: Option<BoardSize>,
+        /// The board's look
+        #[arg(long)]
+        theme: Option<ThemeKind>,
+        /// Play only these animations
+        #[arg(long, value_delimiter = ',', value_name = "KINDS")]
+        animations: Option<Vec<Animation>>,
+        /// Play no animations
+        #[arg(long, conflicts_with = "animations")]
+        no_animations: bool,
+    }
+
+    impl SettingsArgs {
+        pub fn apply(self, settings: &mut Settings) {
+            if let Some(opponent) = self.opponent {
+                settings.opponent = opponent;
+            }
+            if let Some(side) = self.side {
+                settings.side = side;
+            }
+            if let Some(size) = self.size {
+                settings.board = size;
+            }
+            if let Some(theme) = self.theme {
+                settings.theme = theme;
+            }
+            if let Some(animations) = self.animations {
+                settings.motion = Motion::only(animations);
+            }
+            if self.no_animations {
+                settings.motion = Motion::only([]);
+            }
+        }
+    }
+
+    impl Motion {
+        /// Only the animations given play.
+        pub fn only(on: impl IntoIterator<Item = Animation>) -> Self {
+            let on: BTreeSet<_> = on.into_iter().collect();
+            Self {
+                off: Animation::ALL
+                    .into_iter()
+                    .filter(|animation| !on.contains(animation))
+                    .collect(),
+            }
+        }
+    }
+
+    /// `human`, or a bot by its name.
+    impl ValueEnum for Opponent {
+        fn value_variants<'a>() -> &'a [Self] {
+            static ALL: LazyLock<Vec<Opponent>> = LazyLock::new(|| {
+                std::iter::once(Opponent::Human)
+                    .chain(BotKind::ALL.map(Opponent::Bot))
+                    .collect()
+            });
+            &ALL
+        }
+
+        fn to_possible_value(&self) -> Option<PossibleValue> {
+            match self {
+                Self::Human => Some(PossibleValue::new("human").help("Someone else here")),
+                Self::Bot(bot) => bot.to_possible_value(),
+            }
+        }
+    }
+
+    /// `<width>x<height>`.
+    impl ValueEnum for BoardSize {
+        fn value_variants<'a>() -> &'a [Self] {
+            &Self::ALL
+        }
+
+        fn to_possible_value(&self) -> Option<PossibleValue> {
+            Some(PossibleValue::new(format!(
+                "{}x{}",
+                self.width, self.height
+            )))
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        settings: SettingsArgs,
+    }
+
+    fn apply(args: &[&str]) -> Result<Settings, clap::Error> {
+        let cli = Cli::try_parse_from(std::iter::once("test").chain(args.iter().copied()))?;
+        let mut settings = Settings::default();
+        cli.settings.apply(&mut settings);
+        Ok(settings)
+    }
+
+    #[test]
+    fn options_set_what_they_name() {
+        let settings = apply(&[
+            "--opponent=greedy",
+            "--side=green",
+            "--size=6x7",
+            "--theme=cards",
+            "--animations=hops,fades",
+        ])
+        .unwrap();
+        assert_eq!(settings.opponent, Opponent::Bot(BotKind::Greedy));
+        assert_eq!(settings.side, Side::Green);
+        assert_eq!(settings.board, BoardSize::ALL[4]);
+        assert_eq!(settings.theme, ThemeKind::Cards);
+        assert_eq!(
+            Animation::ALL.map(|animation| settings.motion.plays(animation)),
+            [true, false, false, false, false, true]
+        );
+
+        let quiet = apply(&["--no-animations"]).unwrap();
+        assert!(
+            Animation::ALL
+                .iter()
+                .all(|&animation| !quiet.motion.plays(animation))
+        );
+        assert_eq!(apply(&[]).unwrap(), Settings::default());
+    }
+
+    #[test]
+    fn unknown_values_are_refused() {
+        assert!(apply(&["--size=9x9"]).is_err());
+        assert!(apply(&["--animations=hops,spins"]).is_err());
+        assert!(apply(&["--opponent=nobody"]).is_err());
+        assert!(apply(&["--animations=hops", "--no-animations"]).is_err());
     }
 }

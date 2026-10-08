@@ -17,8 +17,10 @@ pub trait Bot: Send + Sync {
 
 /// Every bot there is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "snake_case")]
 pub enum BotKind {
+    /// Takes the hop that wins it the most cells right away.
     Greedy,
 }
 

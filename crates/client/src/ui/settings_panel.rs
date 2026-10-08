@@ -13,7 +13,7 @@ use super::tap::{Tap, Tappable};
 use super::theme::{Fonts, TextStyle, palette, side_color};
 use super::widgets::{self, spawn_option, spawn_switch};
 use crate::play::Match;
-use crate::settings::{BoardSize, Motion, Opponent, Settings, ThemeKind};
+use crate::settings::{Animation, BoardSize, Opponent, Settings, ThemeKind};
 
 pub fn plugin(app: &mut App) {
     app.add_systems(OnEnter(Overlay::Settings), spawn)
@@ -195,18 +195,10 @@ fn spawn(mut commands: Commands, fonts: Res<Fonts>, play: Option<Res<Match>>) {
     }
 
     section(&mut commands, &fonts, card, "ANIMATIONS");
-    let switches: [(&str, fn(&mut Motion) -> &mut bool); 6] = [
-        ("Tokens hop", |motion| &mut motion.hops),
-        ("Cells flip over", |motion| &mut motion.flips),
-        ("Things pop in and out", |motion| &mut motion.pops),
-        ("Hints pulse", |motion| &mut motion.pulses),
-        ("Winning cells cheer", |motion| &mut motion.cheers),
-        ("Colors fade", |motion| &mut motion.fades),
-    ];
-    for (label, field) in switches {
+    for animation in Animation::ALL {
         let line = row(&mut commands, card);
         commands.spawn((
-            fonts.text(label, LABEL),
+            fonts.text(animation.label(), LABEL),
             Node {
                 flex_grow: 1.0,
                 ..default()
@@ -216,8 +208,8 @@ fn spawn(mut commands: Commands, fonts: Res<Fonts>, play: Option<Res<Match>>) {
         spawn_switch(
             &mut commands,
             line,
-            move |settings| *field(&mut settings.motion.clone()),
-            move |settings, on| *field(&mut settings.motion) = on,
+            move |settings| settings.motion.plays(animation),
+            move |settings, on| settings.motion.set(animation, on),
         );
     }
 }
