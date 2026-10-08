@@ -147,7 +147,8 @@ pub fn spawn_sidebar(
         fonts.text(
             "Right-drag across cells, or right-click its ends, to try a \
              jump out; click to clear.\n\
-             Keys: those in the cell corners; Esc takes back the token \
+             Keys: those in the cell corners (hops also by arrows or \
+             HJKL); Esc takes back the token \
              chosen before it hops; F2 deals a new game.",
             HELP,
         ),

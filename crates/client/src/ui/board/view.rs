@@ -236,4 +236,16 @@ mod tests {
         );
         assert!(watching.cells.iter().all(|cell| cell.key.is_none()));
     }
+
+    #[test]
+    fn hops_are_keyed_by_direction() {
+        // Placed between the green cell and the red pair, the token may
+        // hop either way.
+        let mut game = Game::from_board(Board::from_rows(&["G.RR."]), Side::Red);
+        assert!(game.apply(Action::Start(Coord::new(2, 1))));
+        let view = BoardView::of(&game, HOTSEAT);
+        assert_eq!(cell(&view, 0, 1).key, Some('a'));
+        assert_eq!(cell(&view, 5, 1).key, Some('d'));
+        assert!(game.actions().contains(&Action::Jump(Direction::Left)));
+    }
 }

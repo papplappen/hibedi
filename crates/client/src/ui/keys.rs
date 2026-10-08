@@ -1,10 +1,13 @@
 //! Playing by keyboard. Every action the player may take gets a key,
-//! shown small in the corner of the cell it is aimed at; keys follow the
-//! game's order of actions (row by row across the board).
+//! shown small in the corner of the cell it is aimed at.
 //!
-//! Keys run along the keyboard's rows: 1 to 0, then Q to P, A to L and
-//! Z to M. Digits are read by position (so they need no Shift on layouts
-//! like AZERTY), letters as the layout types them, matching the labels.
+//! Hops go by direction: W A S D (also the arrow keys, and Vim's H J K
+//! L). Tokens to start from are numbered in the game's order of actions
+//! (row by row across the board), along the keyboard's rows: 1 to 0,
+//! then Q to P, A to L and Z to M. The two never mix: while a token
+//! hops, every action is a hop. Digits are read by position (so they
+//! need no Shift on layouts like AZERTY), letters as the layout types
+//! them, matching the labels.
 //! Esc takes back the token chosen to jump, placed or activated, before
 //! its first hop; F2 deals a new game, and so does Enter once a game is
 //! over. Keys held with Ctrl, Alt or Super are left to the system.
@@ -12,7 +15,7 @@
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
-use hibedi_core::Action;
+use hibedi_core::{Action, Direction};
 
 use super::{Overlay, Screen};
 use crate::play::Match;
@@ -35,15 +38,43 @@ const KEYS: [char; 36] = [
     'z', 'x', 'c', 'v', 'b', 'n', 'm',
 ];
 
-/// Pairs actions with their keys. `TakeBack` has a key of its own (Esc)
+/// Pairs actions with their keys: hops with their direction's, the
+/// rest with [`KEYS`] in order. `TakeBack` has a key of its own (Esc)
 /// and no cell to show a label on, so it is left out.
 pub fn label(actions: &[Action]) -> impl Iterator<Item = (char, Action)> + '_ {
-    KEYS.into_iter().zip(
-        actions
-            .iter()
-            .copied()
-            .filter(|&action| action != Action::TakeBack),
-    )
+    let mut keys = KEYS.into_iter();
+    actions.iter().filter_map(move |&action| match action {
+        Action::Jump(direction) => Some((direction_key(direction), action)),
+        Action::TakeBack => None,
+        Action::Start(_) => keys.next().map(|key| (key, action)),
+    })
+}
+
+/// The labeled key hopping in a direction.
+const fn direction_key(direction: Direction) -> char {
+    match direction {
+        Direction::Up => 'w',
+        Direction::Left => 'a',
+        Direction::Down => 's',
+        Direction::Right => 'd',
+    }
+}
+
+/// The direction an unlabeled hop key stands for: arrows, and Vim's.
+fn hop_alias(press: &KeyboardInput) -> Option<Direction> {
+    match press.key_code {
+        KeyCode::ArrowUp => Some(Direction::Up),
+        KeyCode::ArrowLeft => Some(Direction::Left),
+        KeyCode::ArrowDown => Some(Direction::Down),
+        KeyCode::ArrowRight => Some(Direction::Right),
+        _ => match typed(press)? {
+            'k' => Some(Direction::Up),
+            'h' => Some(Direction::Left),
+            'j' => Some(Direction::Down),
+            'l' => Some(Direction::Right),
+            _ => None,
+        },
+    }
 }
 
 fn play_by_keyboard(
@@ -84,9 +115,18 @@ fn play_by_keyboard(
                 continue;
             }
             KeyCode::Escape => Some(Action::TakeBack),
-            _ => typed(press)
-                .and_then(|key| label(&play.actions()).find(|&(label, _)| label == key))
-                .map(|(_, action)| action),
+            _ => {
+                let actions = play.actions();
+                hop_alias(press)
+                    .map(Action::Jump)
+                    .filter(|hop| actions.contains(hop))
+                    .or_else(|| {
+                        let key = typed(press)?;
+                        label(&actions)
+                            .find(|&(label, _)| label == key)
+                            .map(|(_, action)| action)
+                    })
+            }
         };
         // Only a possible action marks the match changed.
         if let Some(action) = action
