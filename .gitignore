@@ -3,3 +3,4 @@ web/hibedi-client.*
 web/build.js
 
 *.png
+!/docs/screenshot.png
