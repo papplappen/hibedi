@@ -2,7 +2,7 @@
 
 A full-information grid-based strategy game.
 
-![Hibedi board](docs/screenshot.png)
+![Three Hibedi boards](docs/screenshot.png)
 
 ## Play in the browser
 
