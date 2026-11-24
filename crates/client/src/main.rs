@@ -1,4 +1,4 @@
-//! Hibe di Hopedi client. The game runs the same everywhere: a local
+//! Hibedi client. The game runs the same everywhere: a local
 //! hotseat game, optionally shared through a [`session::Session`].
 //! Getting that session is the only thing that differs per platform
 //! (see [`start`]).
@@ -61,7 +61,7 @@ fn start(app: &mut App, _: Args, settings: &Settings) {
     });
 }
 
-/// Hibe di Hopedi: a game on this device, against someone here or a
+/// Hibedi: a game on this device, against someone here or a
 /// bot (see the settings), or online through a relay server.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(clap::Parser)]
@@ -126,7 +126,7 @@ fn read_game(path: &str) -> Result<hibedi_core::Game, String> {
 
 fn window() -> Window {
     Window {
-        title: "Hibe di Hopedi".to_owned(),
+        title: "Hibedi".to_owned(),
         resolution: (1152, 768).into(),
         // On the web: the page's canvas, filling the body (page.css).
         canvas: Some("#glcanvas".to_owned()),

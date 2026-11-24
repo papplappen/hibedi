@@ -108,7 +108,7 @@ pub fn spawn(mut commands: Commands, fonts: Res<Fonts>) {
                             ..default()
                         },
                         children![
-                            (Title, fonts.text("HIBE DI HOPEDI", TITLE)),
+                            (Title, fonts.text("HIBEDI", TITLE)),
                             (
                                 Subtitle,
                                 fonts.text("A forced-hop territory prototype", SUBTITLE)

@@ -13,8 +13,8 @@ import { joinRoom } from './room.js'
 import { startGame } from './game.js'
 import { trysteroTransport } from './trystero.js'
 
-const APP_ID = 'com.github.gobusmax.hibedihopedi'
-/// Hibe di Hopedi seats two players: red and green.
+const APP_ID = 'com.github.papplappen.hibedi'
+/// Hibedi seats two players: red and green.
 const SEATS = 2
 
 // No 0/1/I/L/O: codes are read aloud and typed from screens.

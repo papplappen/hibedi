@@ -3,7 +3,7 @@
 //! line of its own.
 //!
 //! ```text
-//! [Game "Hibe di Hopedi"]
+//! [Game "Hibedi"]
 //! [Board "R.GG/..R./G..R/.RG./RR.."]
 //! [First "Green"]
 //! [Result "Red"]
@@ -35,7 +35,7 @@ use std::fmt::{self, Write as _};
 
 use crate::{Action, Board, Cell, Coord, Direction, Game, GameResult, Phase, Side, TokenId};
 
-const GAME: &str = "Hibe di Hopedi";
+const GAME: &str = "Hibedi";
 
 /// The notation of a game, from its start to where it stands.
 pub fn write(game: &Game) -> String {
@@ -248,7 +248,7 @@ mod tests {
         let text = write(&game);
         assert_eq!(
             text,
-            "[Game \"Hibe di Hopedi\"]\n\
+            "[Game \"Hibedi\"]\n\
              [Board \"RR.R/G...\"]\n\
              [Tokens \"f3\"]\n\
              [First \"Green\"]\n\
